@@ -75,7 +75,7 @@ export const Config = Schema.object({
 });
 
 /* ------------------------------------------------------------------ */
-/* Small HTTP helpers (same discipline as dsh-prompt-optimizer)        */
+/* Small HTTP helpers (same discipline as the DSH web internals)       */
 /* ------------------------------------------------------------------ */
 
 function sendJson(response, status, payload) {
