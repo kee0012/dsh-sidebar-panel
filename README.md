@@ -30,11 +30,11 @@ dsh-sidebar-panel/
 在 DSH 运行的终端中执行（Web profile）：
 
 ```sh
-# 方式一：npm 安装（包已发布到 npm registry）
-dsh plugin --profile web add dsh-sidebar-panel
-
-# 方式二：GitHub 安装（尚未发布 npm 时）
+# 方式一：GitHub 安装（推荐）
 dsh plugin --profile web add github:kee0012/dsh-sidebar-panel
+
+# 方式二：npm 安装（暂未发布到 npm registry，不建议使用）
+dsh plugin --profile web add dsh-sidebar-panel
 ```
 
 安装后重启 DSH，并刷新浏览器（Ctrl+Shift+R）。验证配置层生效：
