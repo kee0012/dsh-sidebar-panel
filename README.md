@@ -1,4 +1,4 @@
-# dsh-sidebar-panel
+<img width="3084" height="1670" alt="image" src="https://github.com/user-attachments/assets/a8c1651d-6477-4b8a-8614-be53e062cf69" /># dsh-sidebar-panel
 
 DSH（DeepSeek Harness，Web profile）的**右侧面板插件**：在**会话头部右上角**新增一个面板折叠按钮（样式与左侧折叠按钮一致），点击展开/收起右侧 `details` 列；**重启 DSH 后自动展开**（记忆上次偏好，默认打开）。面板包含四个页签：
 
@@ -10,6 +10,8 @@ DSH（DeepSeek Harness，Web profile）的**右侧面板插件**：在**会话�
 - **工具**：本窗口内的工具调用列表与参数/结果详情（自建渲染）。
 
 > **兼容性**：仅支持 DSH 的 **Web profile**（HTTP 同源路由）；desktop（Electron）形态下自定义 HTTP 路由不可用。
+<img width="3084" height="1670" alt="image" src="https://github.com/user-attachments/assets/94bedd76-781d-4203-b9b1-773fad5837f9" />
+
 
 ## 目录结构
 
