@@ -37,13 +37,7 @@ dsh plugin --profile web add dsh-sidebar-panel
 dsh plugin --profile web add github:kee0012/dsh-sidebar-panel
 ```
 
-安装后重启 DSH，并硬刷新浏览器（Ctrl+Shift+R）。验证配置层生效：
-
-```sh
-dsh --profile web --dump-config | grep dsh-sidebar-panel
-```
-
-> **本地开发**：改代码后需重启 DSH 生效。可直接从源码目录安装（`dsh plugin --profile web add /path/to/dsh-sidebar-panel`），或 `pnpm pack` 后安装 tarball（`dsh plugin --profile web add ./dsh-sidebar-panel-0.1.0.tgz`）。
+安装后重启 DSH，并刷新浏览器（Ctrl+Shift+R）。验证配置层生效：
 
 ## 服务端 API（同源，供客户端面板使用）
 
