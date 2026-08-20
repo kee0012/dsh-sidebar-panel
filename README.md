@@ -32,20 +32,10 @@ dsh-sidebar-panel/
 在 DSH 运行的终端中执行（Web profile）：
 
 ```sh
-# 方式一：本地目录安装（开发迭代，改代码后重启 DSH 生效）
-dsh plugin --profile web add /path/to/dsh-sidebar-panel
-
-# 方式二：打包安装（适合分发）
-cd dsh-sidebar-panel
-pnpm pack
-dsh plugin --profile web add ./dsh-sidebar-panel-0.1.0.tgz
+dsh plugin --profile web add dsh-sidebar-panel
 ```
 
-安装后重启 DSH，并硬刷新浏览器（Ctrl+Shift+R）。验证配置层生效：
-
-```sh
-dsh --profile web --dump-config | grep dsh-sidebar-panel
-```
+安装后重启 DSH，并硬刷新浏览器
 
 ## 服务端 API（同源，供客户端面板使用）
 
