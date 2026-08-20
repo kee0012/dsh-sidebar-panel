@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Pack / build artifacts
+*.tgz
+*.tar.gz
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Test / coverage
+coverage/
