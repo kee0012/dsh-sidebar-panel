@@ -10,8 +10,6 @@ DSH（DeepSeek Harness，Web profile）的**右侧面板插件**：在**会话�
 - **工具**：本窗口内的工具调用列表与参数/结果详情（自建渲染）。
 
 > **兼容性**：仅支持 DSH 的 **Web profile**（HTTP 同源路由）；desktop（Electron）形态下自定义 HTTP 路由不可用。
-<img width="3084" height="1670" alt="image" src="https://github.com/user-attachments/assets/94bedd76-781d-4203-b9b1-773fad5837f9" />
-
 
 ## 目录结构
 
