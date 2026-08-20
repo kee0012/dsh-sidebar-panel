@@ -28,20 +28,15 @@ dsh-sidebar-panel/
 Run in a terminal where DSH runs (Web profile):
 
 ```sh
-# Option 1: from npm (published to the registry)
+# Option 1: from GitHub (Recommend)
+dsh plugin --profile web add github:kee0012/dsh-sidebar-panel
+
+# Option 2: from npm (Not yet published to the npm registry)
 dsh plugin --profile web add dsh-sidebar-panel
 
-# Option 2: from GitHub (if not yet published to npm)
-dsh plugin --profile web add github:kee0012/dsh-sidebar-panel
 ```
 
-Restart DSH and hard-refresh the browser (Ctrl+Shift+R). Verify the config layer picked it up:
-
-```sh
-dsh --profile web --dump-config | grep dsh-sidebar-panel
-```
-
-> **Local development**: code changes require a DSH restart. Install straight from the source directory (`dsh plugin --profile web add /path/to/dsh-sidebar-panel`) or from a packed tarball (`pnpm pack`, then `dsh plugin --profile web add ./dsh-sidebar-panel-0.1.0.tgz`).
+Restart DSH and hard-refresh the browser (Ctrl+Shift+R). Verify the config layer picked it up.
 
 ## Server API (same-origin, consumed by the browser panel)
 
