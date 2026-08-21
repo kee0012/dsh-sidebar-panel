@@ -5,13 +5,7 @@
  *  1. `conversation.session.header.utilities` — the right-aligned session
  *     header utility row: a panel toggle styled like the sidebar fold button
  *     (open / collapse the right details column from the top-right).
- *  2. `sidebar.footer.action` — a fallback toggle rendered ONLY while the
- *     current session is blank (fresh "new session" hero). The host hides the
- *     whole conversation header — and with it the header toggle — during the
- *     blank state, so this rail button keeps an "open the panel" affordance
- *     on screen at all times. It disappears once the session engages and the
- *     header button is back.
- *  3. `details` — the right column itself, shadowing ui-conversation's
+ *  2. `details` — the right column itself, shadowing ui-conversation's
  *     DetailsPanel at a lower priority. The panel has four tabs:
  *     概览 (context/token/cost), 文件 (workspace file tree + context menu),
  *     改动 (files written this session), 工具 (tool calls in this window).
@@ -24,6 +18,24 @@
  * re-opens on sessionId/blank transitions while the preference is "open".
  * A manual collapse writes "closed" and is respected everywhere until the
  * user clicks open again.
+ *
+ * Blank-session persistence: while the current session is blank (fresh "new
+ * session" hero), the host layout force-hides the details column (AppFrame
+ * computes the column width as 0) and hides the conversation header (the
+ * top-right toggle vanishes with it). Slots cannot override either, so an
+ * install-time controller (installBlankSessionController) takes over:
+ *  - it injects ONE declarative CSS rule with `!important` — the frame grid
+ *    becomes `<sidebar>px minmax(0, 1fr) 360px` — while blank && preference
+ *    "open". `!important` deterministically beats the host's inline style on
+ *    every render (no DOM rewriting, no observer races), and the three grid
+ *    cells keep the panel structurally pinned to the right at fixed width:
+ *    it can never go fullscreen or cover the chat area;
+ *  - it renders a fixed top-right toggle visible ONLY during blank (same
+ *    look as the header button), so the "open the panel" affordance never
+ *    disappears and clicking it really opens/collapses (it also syncs the
+ *    layout store so the choice survives blank -> engage);
+ *  - once the session engages the keepalive rule is removed and the host
+ *    takes over normally; the fixed button hides (header button is back).
  *
  * The `conversation.details.tool` seat belongs to the shipped DetailsPanel
  * registration (declaring is claiming), so the 工具 tab renders a self-built
@@ -435,8 +447,10 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
 .dsp-toggle { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: none; border-radius: 50%; background: transparent; color: var(--dsw-alias-label-secondary, #666); cursor: pointer; flex: none; }
 .dsp-toggle:hover { background: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / 6%)); }
 .dsp-toggle svg { display: block; }
-/* Rail-mode fallback toggle (blank-session affordance in the sidebar footer). */
-.dsp-toggle--rail { margin: 4px 10px; }
+/* Blank-session top-right toggle: floats where the (hidden) header button
+   would be, with a surface so it reads as a real button on the hero. */
+.dsp-toggle--fixed { position: fixed; top: 14px; right: 24px; z-index: 10000; background: var(--dsw-alias-bg-layer-1, #fff); border: 1px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 14%)); box-shadow: 0 2px 10px rgb(0 0 0 / 12%); }
+.dsp-toggle--fixed:hover { border-color: var(--dsw-alias-border-l3, rgb(0 0 0 / 24%)); }
 `;
 
   function installStyles() {
@@ -496,60 +510,162 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
   }
 
   /**
-   * Fallback panel toggle injected into `sidebar.footer.action`. The host
-   * conversation header — and with it the primary toggle — is `display:none`
-   * while the current session is blank (fresh "new session" hero), so this
-   * button keeps an always-visible affordance on screen during that state.
-   * It renders nothing once the session engages and the header button is
-   * back (the two toggles never appear together). Same open/collapsed probe
-   * and preference discipline as the header toggle.
+   * Blank-session persistence controller (see the module doc). Runs once at
+   * apply time, outside any slot:
+   *  - While the CURRENT session is blank and the preference is "open", the
+   *    host AppFrame computes the details column as 0px. Instead of touching
+   *    the host's inline style (which fights React's render ownership and can
+   *    corrupt the grid — the old approach), this injects ONE declarative CSS
+   *    rule with `!important`: the frame grid becomes
+   *    `<sidebar>px minmax(0, 1fr) 360px`. `!important` always beats the host
+   *    inline style, so every host re-render is overridden deterministically
+   *    with no observer race; the three columns are real grid cells, so the
+   *    panel is structurally pinned to the right at fixed width and can never
+   *    cover the chat area.
+   *  - A fixed top-right toggle (same look as the header button) is shown
+   *    ONLY during blank, when the host hides the conversation header and
+   *    the header toggle with it. Clicking it flips the preference AND the
+   *    layout store (openDetails/closeDetails), so the choice survives the
+   *    blank -> engage transition consistently.
+   *  - Once the session engages, the keepalive rule is removed and the host
+   *    re-renders with the store width and takes over normally; the fixed
+   *    button hides (header button back).
    */
-  function SidebarToggleButton(props) {
-    var blank = props.useSessions(function (s) {
-      var id = s.current;
-      return id !== void 0 && s.byId[id] !== undefined && s.byId[id].blank === true;
-    });
+  var FRAME_SELECTOR = "div[data-details-collapsed]";
+  var BLANK_DETAILS_WIDTH = 360;
+  var KEEPALIVE_STYLE_ID = STYLE_ID + "-blank-keepalive";
 
-    var [collapsed, setCollapsed] = React.useState(isDetailsCollapsed);
+  function currentSessionBlank(sessions) {
+    try {
+      var snap = sessions.list.getSnapshot();
+      var id = snap.current;
+      return id !== void 0 && snap.byId[id] !== undefined && snap.byId[id].blank === true;
+    } catch (_) {
+      return false;
+    }
+  }
 
-    React.useEffect(function () {
-      var observer = new MutationObserver(function () {
-        setCollapsed(isDetailsCollapsed());
-      });
-      observer.observe(document.body, {
-        attributes: true,
-        attributeFilter: ["data-details-collapsed"],
-        subtree: true,
-      });
-      return function () { observer.disconnect(); };
-    }, []);
+  /**
+   * Inject the declarative three-column keepalive rule. Reads the current
+   * sidebar width from the frame's inline grid (the host always writes the
+   * real sidebar column) so the rule mirrors the user's sidebar preference;
+   * re-run whenever the host re-renders (sidebar drag, viewport change).
+   */
+  function applyBlankKeepalive() {
+    var sidebarPx = 280;
+    var frame = document.querySelector(FRAME_SELECTOR);
+    if (frame !== null) {
+      var grid = frame.style.gridTemplateColumns;
+      var m = typeof grid === "string" ? /^\s*(\d+(?:\.\d+)?)px/.exec(grid) : null;
+      if (m !== null) sidebarPx = parseFloat(m[1]);
+    }
+    var style = document.getElementById(KEEPALIVE_STYLE_ID);
+    if (style === null) {
+      style = document.createElement("style");
+      style.id = KEEPALIVE_STYLE_ID;
+      document.head.appendChild(style);
+    }
+    style.textContent = FRAME_SELECTOR + " { grid-template-columns: " + sidebarPx + "px minmax(0, 1fr) " + BLANK_DETAILS_WIDTH + "px !important; }";
+  }
 
-    if (!blank) return null;
+  function removeBlankKeepalive() {
+    var style = document.getElementById(KEEPALIVE_STYLE_ID);
+    if (style !== null) style.remove();
+  }
 
-    function toggle() {
-      if (isDetailsCollapsed()) {
-        setDetailsPref("open");
-        props.openPanel();
+  function fixedToggleLabel() {
+    var isZh = (document.documentElement.lang || "zh").toLowerCase().indexOf("zh") === 0;
+    var open = getDetailsPref() === "open";
+    if (isZh) return open ? "收起面板" : "打开面板";
+    return open ? "Collapse panel" : "Open panel";
+  }
+
+  /** Panel glyph (right column) for the fixed toggle — inline SVG, no deps. */
+  function fixedToggleGlyph() {
+    var ns = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", "16");
+    svg.setAttribute("height", "16");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.5");
+    svg.setAttribute("stroke-linecap", "round");
+    var rect = document.createElementNS(ns, "rect");
+    rect.setAttribute("x", "2"); rect.setAttribute("y", "2.5");
+    rect.setAttribute("width", "12"); rect.setAttribute("height", "11");
+    rect.setAttribute("rx", "1.5");
+    var line = document.createElementNS(ns, "line");
+    line.setAttribute("x1", "10"); line.setAttribute("y1", "2.5"); line.setAttribute("x2", "10"); line.setAttribute("y2", "13.5");
+    svg.appendChild(rect);
+    svg.appendChild(line);
+    return svg;
+  }
+
+  function installBlankSessionController(ctx) {
+    var sessions = ctx.get("sessions");
+    if (!sessions || !sessions.list || typeof sessions.list.subscribe !== "function") return function () {};
+
+    var button = null;
+
+    function sync() {
+      var blank = currentSessionBlank(sessions);
+      var open = getDetailsPref() === "open";
+      if (blank && open) {
+        applyBlankKeepalive();
       } else {
-        setDetailsPref("closed");
-        props.closePanel();
+        removeBlankKeepalive();
+      }
+      if (button === null) return;
+      if (blank) {
+        if (!button.isConnected) document.body.appendChild(button);
+        var label = fixedToggleLabel();
+        button.title = label;
+        button.setAttribute("aria-label", label);
+        button.setAttribute("aria-pressed", open ? "true" : "false");
+      } else if (button.isConnected) {
+        button.remove();
       }
     }
 
-    var label = collapsed ? props.t("toggle.open") : props.t("toggle.collapse");
-    return React.createElement(
-      "button",
-      {
-        type: "button",
-        className: "dsp-toggle dsp-toggle--rail",
-        title: label,
-        "aria-label": label,
-        "aria-pressed": collapsed ? "false" : "true",
-        "data-plugin": PACKAGE_ID,
-        onClick: toggle,
-      },
-      React.createElement(IconPanelLeftOutline16, { size: 16 })
-    );
+    // Blank flag changes (new session, blank -> engage) drive the sync.
+    var unsubscribe = sessions.list.subscribe(sync);
+
+    // The host re-renders the grid (sidebar drag, viewport, …): refresh the
+    // keepalive rule's sidebar width so it always mirrors the live layout.
+    var observer = new MutationObserver(function () {
+      if (currentSessionBlank(sessions) && getDetailsPref() === "open") {
+        applyBlankKeepalive();
+      }
+    });
+    observer.observe(document.body, { attributes: true, attributeFilter: ["style"], subtree: true });
+
+    // Fixed top-right toggle (blank only).
+    button = document.createElement("button");
+    button.type = "button";
+    button.className = "dsp-toggle dsp-toggle--fixed";
+    button.setAttribute("data-plugin", PACKAGE_ID);
+    button.appendChild(fixedToggleGlyph());
+    button.addEventListener("click", function () {
+      if (!currentSessionBlank(sessions)) return;
+      var next = getDetailsPref() === "open" ? "closed" : "open";
+      setDetailsPref(next);
+      // Keep the layout store in sync so the choice survives blank -> engage.
+      try {
+        if (next === "open") ctx.layout.openDetails();
+        else ctx.layout.closeDetails();
+      } catch (_) {}
+      sync();
+    });
+
+    sync();
+
+    return function () {
+      unsubscribe();
+      observer.disconnect();
+      removeBlankKeepalive();
+      if (button !== null && button.isConnected) button.remove();
+    };
   }
 
   /* ------------------------------------------------------------------ */
@@ -1305,6 +1421,12 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
       return ctx.locale.register(NS, { zh: zh, en: en });
     }, "dsh-sidebar-panel: dictionaries");
 
+    // Blank-session persistence: keeps the details column resident and the
+    // toggle reachable while the host force-hides both (see module doc).
+    ctx.effect(function () {
+      return installBlankSessionController(ctx);
+    }, "dsh-sidebar-panel: blank-session controller");
+
     ctx.slots.inject("conversation.session.header.utilities", function () {
       return ctx.slots.register({
         name: "conversation.session.header.utilities",
@@ -1319,26 +1441,6 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
           };
         },
       }, ToggleDetailsButton);
-    });
-
-    // Always-visible fallback toggle: the host hides the conversation header
-    // (and the primary toggle with it) while the current session is blank, so
-    // this rail button keeps an "open the panel" affordance on screen. It
-    // renders nothing once the session engages.
-    ctx.slots.inject("sidebar.footer.action", function () {
-      return ctx.slots.register({
-        name: "sidebar.footer.action",
-        id: "dsh-sidebar-panel-toggle-rail",
-        order: 100,
-        label: function () { return "会话面板"; },
-        locale: NS,
-        inject: function () {
-          return {
-            openPanel: function () { ctx.layout.openDetails(); },
-            closePanel: function () { ctx.layout.closeDetails(); },
-          };
-        },
-      }, SidebarToggleButton);
     });
 
     ctx.slots.inject("details", function () {
@@ -1365,7 +1467,7 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
   }
 
   exports.name = PACKAGE_ID;
-  exports.inject = ["slots", "layout", "locale"];
+  exports.inject = ["slots", "layout", "locale", "sessions"];
   exports.apply = apply;
   return module.exports;
 }});

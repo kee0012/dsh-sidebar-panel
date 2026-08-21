@@ -18,7 +18,7 @@ dsh-sidebar-panel/
 ├── package.json          # DSH bundle 清单 + client 注入声明
 ├── cordis.patch.yml      # 把插件插入 DSH 组合层
 ├── src/index.js          # 服务端：同源 HTTP API + 会话事件折叠（用量/费用/改动）+ 文件浏览 + reveal
-├── client/client.js      # 客户端：右上角折叠按钮 + sidebar 兜底按钮 + details 列面板（常驻、自动重开）+ 四页签 + 右键菜单
+├── client/client.js      # 客户端：右上角折叠按钮 + details 列面板（常驻、自动重开、blank 期 DOM 保活）+ 四页签 + 右键菜单
 ├── test/unit.test.mjs    # 服务端单元测试（mock ctx，无需 DSH 实例，不依赖具体路径）
 └── README.md / README_EN.md
 ```
@@ -101,7 +101,8 @@ curl -H "Origin: http://127.0.0.1:3080" -H "Content-Type: application/json" -X P
 ## 已知限制
 
 - **details 列替换**：插件以 `priority: -1` 顶替内置 DetailsPanel（单槽位只能有一个渲染者）。内置面板的"工具详情"座（`conversation.details.tool`）属于其自身声明，插件无法复用，故"工具"页签为自建详情视图；聊天里的 Inspect 按钮仍会打开右侧列，但不会自动选中工具。
-- **开合偏好（常驻）**：面板开合状态存于浏览器 localStorage（`dshSidebarPanel:details-open`），默认 `open`。**切会话/新建会话不会自动收起**：宿主框架在切换会话（及 blank 会话首次发言 engage）时会调用 `closeDetails()` 收起 details 列，插件检测到会话/blank 变化后会自动重开，直到用户主动点击收起/关闭（记为 `closed`，此后所有切换都保持收起，直到再次点击打开）。**按钮常驻**：blank（新建会话 hero）状态下宿主隐藏整个会话 header（右上角按钮随之隐藏），插件会在左侧 sidebar 底部注入同款兜底折叠按钮，保证任何时刻都有打开面板的入口。
+- **开合偏好（常驻）**：面板开合状态存于浏览器 localStorage（`dshSidebarPanel:details-open`），默认 `open`。**切会话/新建会话不会自动收起**：宿主框架在切换会话（及 blank 会话首次发言 engage）时会调用 `closeDetails()` 收起 details 列，插件检测到会话/blank 变化后会自动重开，直到用户主动点击收起/关闭（记为 `closed`，此后所有切换都保持收起，直到再次点击打开）。
+- **blank（新建会话 hero）期间面板也常驻**：宿主布局在 blank 状态下会把 details 列宽强制为 0、并隐藏整个会话 header（右上角按钮随之消失）。插件只注入**一条声明式 CSS 规则**（`!important`，三列：`<侧栏>px | 聊天区 minmax(0,1fr) | 面板 360px`）在 blank 且偏好为打开时生效——不触碰宿主内联样式、不与 React 渲染竞争，宿主任何重渲染都无法覆盖；三列是真实 grid 单元格，面板**结构性固定在右侧固定宽度**，不可能全屏或遮挡聊天区。同时在**右上角原位**渲染同款固定折叠按钮（仅 blank 期间显示，点击真实开合并同步布局状态）；会话正式启用后规则移除、宿主恢复正常接管，固定按钮自动隐藏、右上角 header 按钮回归。
 - **费用匹配**：费用是估算值，取决于定价表配置；金额保留 6 位小数传输、按大小自适应显示精度。
 - **改动追踪**：只覆盖写文件类工具调用；bash/pwsh 内部的文件改动无法可靠捕获。
 - **概览请求数/费用/运行时间**：由服务端从会话事件日志折叠（`request/header`、`assistant/message` 的 usage），插件安装前的历史会话在首次访问时会一次性补算；运行时间 = 自首次请求至今（含空闲）。
