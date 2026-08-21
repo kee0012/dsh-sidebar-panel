@@ -1,6 +1,6 @@
 <img width="3084" height="1670" alt="image" src="https://github.com/user-attachments/assets/a8c1651d-6477-4b8a-8614-be53e062cf69" /># dsh-sidebar-panel
 
-DSH（DeepSeek Harness，Web profile）的**右侧面板插件**：在**会话头部右上角**新增一个面板折叠按钮（样式与左侧折叠按钮一致），点击展开/收起右侧 `details` 列；**重启 DSH 后自动展开**（记忆上次偏好，默认打开）。面板包含四个页签：
+DSH（DeepSeek Harness，Web profile）的**右侧面板插件**：在**会话头部右上角**新增一个面板折叠按钮（样式与左侧折叠按钮一致），点击展开/收起右侧 `details` 列；面板**常驻并保持打开**——默认打开，切换会话/新建会话不会自动收起，直到用户自己点击收起按钮（收起状态会被记住）。面板包含四个页签：
 
 - **概览**：
 - **DeepSeek 账户**卡片——官方余额（经 `GET https://api.deepseek.com/user/balance` 实时查询，15 秒刷新）与 **充值按钮**（跳转 https://platform.deepseek.com/usage）；
@@ -18,7 +18,7 @@ dsh-sidebar-panel/
 ├── package.json          # DSH bundle 清单 + client 注入声明
 ├── cordis.patch.yml      # 把插件插入 DSH 组合层
 ├── src/index.js          # 服务端：同源 HTTP API + 会话事件折叠（用量/费用/改动）+ 文件浏览 + reveal
-├── client/client.js      # 客户端：右上角折叠按钮 + details 列面板（自动展开）+ 四页签 + 右键菜单
+├── client/client.js      # 客户端：右上角折叠按钮 + sidebar 兜底按钮 + details 列面板（常驻、自动重开）+ 四页签 + 右键菜单
 ├── test/unit.test.mjs    # 服务端单元测试（mock ctx，无需 DSH 实例，不依赖具体路径）
 └── README.md / README_EN.md
 ```
@@ -101,7 +101,7 @@ curl -H "Origin: http://127.0.0.1:3080" -H "Content-Type: application/json" -X P
 ## 已知限制
 
 - **details 列替换**：插件以 `priority: -1` 顶替内置 DetailsPanel（单槽位只能有一个渲染者）。内置面板的"工具详情"座（`conversation.details.tool`）属于其自身声明，插件无法复用，故"工具"页签为自建详情视图；聊天里的 Inspect 按钮仍会打开右侧列，但不会自动选中工具。
-- **自动展开偏好**：面板开合状态存于浏览器 localStorage（`dsh-sidebar-panel:details-open`），默认 `open`——重启 DSH 后自动展开；用户主动收起后记为 `closed`，下次启动保持收起。切会话时 DSH 自身会收起 details 列（框架行为），不会自动重开。
+- **开合偏好（常驻）**：面板开合状态存于浏览器 localStorage（`dshSidebarPanel:details-open`），默认 `open`。**切会话/新建会话不会自动收起**：宿主框架在切换会话（及 blank 会话首次发言 engage）时会调用 `closeDetails()` 收起 details 列，插件检测到会话/blank 变化后会自动重开，直到用户主动点击收起/关闭（记为 `closed`，此后所有切换都保持收起，直到再次点击打开）。**按钮常驻**：blank（新建会话 hero）状态下宿主隐藏整个会话 header（右上角按钮随之隐藏），插件会在左侧 sidebar 底部注入同款兜底折叠按钮，保证任何时刻都有打开面板的入口。
 - **费用匹配**：费用是估算值，取决于定价表配置；金额保留 6 位小数传输、按大小自适应显示精度。
 - **改动追踪**：只覆盖写文件类工具调用；bash/pwsh 内部的文件改动无法可靠捕获。
 - **概览请求数/费用/运行时间**：由服务端从会话事件日志折叠（`request/header`、`assistant/message` 的 usage），插件安装前的历史会话在首次访问时会一次性补算；运行时间 = 自首次请求至今（含空闲）。

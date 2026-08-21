@@ -5,12 +5,25 @@
  *  1. `conversation.session.header.utilities` — the right-aligned session
  *     header utility row: a panel toggle styled like the sidebar fold button
  *     (open / collapse the right details column from the top-right).
- *  2. `details` — the right column itself, shadowing ui-conversation's
+ *  2. `sidebar.footer.action` — a fallback toggle rendered ONLY while the
+ *     current session is blank (fresh "new session" hero). The host hides the
+ *     whole conversation header — and with it the header toggle — during the
+ *     blank state, so this rail button keeps an "open the panel" affordance
+ *     on screen at all times. It disappears once the session engages and the
+ *     header button is back.
+ *  3. `details` — the right column itself, shadowing ui-conversation's
  *     DetailsPanel at a lower priority. The panel has four tabs:
  *     概览 (context/token/cost), 文件 (workspace file tree + context menu),
  *     改动 (files written this session), 工具 (tool calls in this window).
- *     It auto-opens on load (persisted preference, default open) so a DSH
- *     restart does not require a manual click.
+ *
+ * Persistence semantics: the open/collapsed state is a sticky preference
+ * (`dshSidebarPanel:details-open`, default "open"). The panel stays open
+ * across session switches and new-session engagements UNLESS the user
+ * collapsed it themselves — the host framework calls closeDetails() on every
+ * session change (and once more when a blank session engages), so PanelRoot
+ * re-opens on sessionId/blank transitions while the preference is "open".
+ * A manual collapse writes "closed" and is respected everywhere until the
+ * user clicks open again.
  *
  * The `conversation.details.tool` seat belongs to the shipped DetailsPanel
  * registration (declaring is claiming), so the 工具 tab renders a self-built
@@ -278,6 +291,28 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     return document.querySelector("[data-details-collapsed]") !== null;
   }
 
+  /* Open/collapsed preference ------------------------------------------ */
+
+  var DETAILS_PREF_KEY = NS + ":details-open";
+
+  /**
+   * Sticky open/collapsed preference, default "open": the panel stays open
+   * unless the user collapsed it themselves. Both the header toggle and the
+   * panel's close button write this; the auto-open logic reads it before
+   * re-opening on session transitions.
+   */
+  function getDetailsPref() {
+    try {
+      return localStorage.getItem(DETAILS_PREF_KEY) === "closed" ? "closed" : "open";
+    } catch (_) {
+      return "open";
+    }
+  }
+
+  function setDetailsPref(value) {
+    try { localStorage.setItem(DETAILS_PREF_KEY, value); } catch (_) {}
+  }
+
   /* File preview vocabulary -------------------------------------------- */
 
   var TEXT_EXTS = {
@@ -400,6 +435,8 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
 .dsp-toggle { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: none; border-radius: 50%; background: transparent; color: var(--dsw-alias-label-secondary, #666); cursor: pointer; flex: none; }
 .dsp-toggle:hover { background: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / 6%)); }
 .dsp-toggle svg { display: block; }
+/* Rail-mode fallback toggle (blank-session affordance in the sidebar footer). */
+.dsp-toggle--rail { margin: 4px 10px; }
 `;
 
   function installStyles() {
@@ -434,8 +471,10 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
 
     function toggle() {
       if (isDetailsCollapsed()) {
+        setDetailsPref("open");
         props.openPanel();
       } else {
+        setDetailsPref("closed");
         props.closePanel();
       }
     }
@@ -446,6 +485,63 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
       {
         type: "button",
         className: "dsp-toggle",
+        title: label,
+        "aria-label": label,
+        "aria-pressed": collapsed ? "false" : "true",
+        "data-plugin": PACKAGE_ID,
+        onClick: toggle,
+      },
+      React.createElement(IconPanelLeftOutline16, { size: 16 })
+    );
+  }
+
+  /**
+   * Fallback panel toggle injected into `sidebar.footer.action`. The host
+   * conversation header — and with it the primary toggle — is `display:none`
+   * while the current session is blank (fresh "new session" hero), so this
+   * button keeps an always-visible affordance on screen during that state.
+   * It renders nothing once the session engages and the header button is
+   * back (the two toggles never appear together). Same open/collapsed probe
+   * and preference discipline as the header toggle.
+   */
+  function SidebarToggleButton(props) {
+    var blank = props.useSessions(function (s) {
+      var id = s.current;
+      return id !== void 0 && s.byId[id] !== undefined && s.byId[id].blank === true;
+    });
+
+    var [collapsed, setCollapsed] = React.useState(isDetailsCollapsed);
+
+    React.useEffect(function () {
+      var observer = new MutationObserver(function () {
+        setCollapsed(isDetailsCollapsed());
+      });
+      observer.observe(document.body, {
+        attributes: true,
+        attributeFilter: ["data-details-collapsed"],
+        subtree: true,
+      });
+      return function () { observer.disconnect(); };
+    }, []);
+
+    if (!blank) return null;
+
+    function toggle() {
+      if (isDetailsCollapsed()) {
+        setDetailsPref("open");
+        props.openPanel();
+      } else {
+        setDetailsPref("closed");
+        props.closePanel();
+      }
+    }
+
+    var label = collapsed ? props.t("toggle.open") : props.t("toggle.collapse");
+    return React.createElement(
+      "button",
+      {
+        type: "button",
+        className: "dsp-toggle dsp-toggle--rail",
         title: label,
         "aria-label": label,
         "aria-pressed": collapsed ? "false" : "true",
@@ -1099,6 +1195,13 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     var [tab, setTab] = React.useState("overview");
     var cwd = props.cwd || null;
 
+    // Blank flag of the CURRENT session (via the sessions list, same source
+    // the host layout uses to decide whether the details column may render).
+    var blank = props.useSessions(function (s) {
+      var id = s.current;
+      return id !== void 0 && s.byId[id] !== undefined && s.byId[id].blank === true;
+    });
+
     React.useEffect(function () {
       try {
         var saved = localStorage.getItem(NS + ":tab:" + props.sessionId);
@@ -1106,17 +1209,22 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
       } catch (_) {}
     }, [props.sessionId]);
 
-    // Auto-expand on every (re)load — the panel opens by default whenever DSH
-    // starts, with no manual click required. The details seat stays mounted at
-    // width 0, so this effect runs on every page load with the layout service
-    // already attached; a previous manual close is deliberately NOT remembered
-    // across restarts (the user asked for unconditional auto-expand).
+    // Re-open the panel whenever the session changes or a blank session
+    // engages, while the preference is "open". The host AppFrame closes the
+    // details column on EVERY session switch (useLayoutEffect closeDetails)
+    // and once more the moment a blank session engages — and the details
+    // seat does NOT remount on that blank→engage transition (same session
+    // id), so a mount-only auto-open would leave the panel dead. This effect
+    // runs as a passive effect, i.e. after the host's layout-phase close, so
+    // the re-open lands cleanly. A manual collapse writes the preference to
+    // "closed" and is respected everywhere until the user opens again.
     React.useEffect(function () {
+      if (getDetailsPref() !== "open") return;
       if (typeof props.openPanel === "function") {
         try { props.openPanel(); } catch (_) {}
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [props.sessionId, blank]);
 
     function switchTab(next) {
       setTab(next);
@@ -1156,7 +1264,10 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
           className: "dsp__close",
           "aria-label": t("panel.close"),
           title: t("panel.close"),
-          onClick: props.closePanel,
+          onClick: function () {
+            setDetailsPref("closed");
+            props.closePanel();
+          },
         }, "✕")
       ),
       React.createElement(
@@ -1208,6 +1319,26 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
           };
         },
       }, ToggleDetailsButton);
+    });
+
+    // Always-visible fallback toggle: the host hides the conversation header
+    // (and the primary toggle with it) while the current session is blank, so
+    // this rail button keeps an "open the panel" affordance on screen. It
+    // renders nothing once the session engages.
+    ctx.slots.inject("sidebar.footer.action", function () {
+      return ctx.slots.register({
+        name: "sidebar.footer.action",
+        id: "dsh-sidebar-panel-toggle-rail",
+        order: 100,
+        label: function () { return "会话面板"; },
+        locale: NS,
+        inject: function () {
+          return {
+            openPanel: function () { ctx.layout.openDetails(); },
+            closePanel: function () { ctx.layout.closeDetails(); },
+          };
+        },
+      }, SidebarToggleButton);
     });
 
     ctx.slots.inject("details", function () {

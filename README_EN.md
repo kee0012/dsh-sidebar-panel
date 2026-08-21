@@ -1,6 +1,6 @@
 # dsh-sidebar-panel
 
-A **right-side panel plugin** for DSH (DeepSeek Harness, Web profile). It adds a panel toggle button at the **top-right of the session header** (styled like the built-in left fold button) that expands/collapses the right `details` column. The panel **auto-opens after a DSH restart** (persisted preference, open by default). It has four tabs:
+A **right-side panel plugin** for DSH (DeepSeek Harness, Web profile). It adds a panel toggle button at the **top-right of the session header** (styled like the built-in left fold button) that expands/collapses the right `details` column. The panel **stays open by default and survives session switches** — it only collapses when the user clicks the collapse button (the collapsed state is remembered). It has four tabs:
 
 - **Overview**: a **DeepSeek account** card at the top — official balance (fetched live from `GET https://api.deepseek.com/user/balance`, refreshed every 15 s) and a **Top Up** button (https://platform.deepseek.com/usage). Below it: context window (used/total/percent/distance-to-compaction), current turn's context budget (prompt/output budget, physical headroom, output-cap source), session metrics (hit rate / **session cost** / runtime / request count / total tokens), and usage analysis (by source / by type, with input-output and cache hit-miss breakdown). Server-side data refreshes every 5 s ("updated at HH:MM:SS" in the corner); projected data (tokens/context) reacts in real time.
 - **Files**: a file tree of the current session's workspace. **Click a file to preview** (md/txt/code inline; PDF and images embedded; truncation notice for large files). **Right-click menu**: reveal in file manager, add file reference / add file content (file), add folder reference (folder), copy absolute path / copy relative path. Inserted content is written into the chat input box.
@@ -16,7 +16,7 @@ dsh-sidebar-panel/
 ├── package.json          # DSH bundle manifest + client injection declaration
 ├── cordis.patch.yml      # inserts the plugin into the DSH composition layer
 ├── src/index.js          # server: same-origin HTTP API + session-event folding (usage/cost/changes) + file browsing + reveal
-├── client/client.js      # browser: top-right toggle + details-column panel (auto-open) + four tabs + context menu
+├── client/client.js      # browser: top-right toggle + sidebar fallback toggle + details-column panel (persistent, auto-reopen) + four tabs + context menu
 ├── test/unit.test.mjs    # server unit tests (mocked ctx, no DSH instance, no machine-specific paths)
 └── README.md / README_EN.md
 ```
@@ -102,7 +102,7 @@ curl -H "Origin: http://127.0.0.1:3080" -H "Content-Type: application/json" -X P
 ## Known limitations
 
 - **Details-column replacement**: the plugin shadows the built-in DetailsPanel at `priority: -1` (a single slot allows one renderer). The built-in "tool details" seat (`conversation.details.tool`) is claimed by its own registration and cannot be reused, so the **Tools** tab renders a self-built detail view; the Inspect button in chat still opens the right column but does not auto-select a tool.
-- **Auto-open preference**: panel open/collapsed state is stored in browser localStorage (`dsh-sidebar-panel:details-open`), default `open` — it auto-expands after a DSH restart; collapsing once records `closed` and stays collapsed on next launch. DSH itself collapses the details column when switching sessions (framework behavior).
+- **Open/collapsed preference (persistent)**: panel state is stored in browser localStorage (`dshSidebarPanel:details-open`), default `open`. **Session switches and new sessions do NOT auto-collapse it**: the host framework calls `closeDetails()` on every session switch (and once more when a blank session engages), and the plugin detects the session/blank transition and re-opens automatically — until the user collapses it themselves (recorded as `closed`, respected across all switches until they click open again). **Always-visible button**: while the current session is blank (fresh "new session" hero) the host hides the whole conversation header — including the top-right toggle — so the plugin also injects an identical fallback toggle into the left sidebar footer, keeping an "open the panel" affordance on screen at all times.
 - **Cost matching**: costs are estimates driven by the pricing table; amounts are transmitted with 6 decimal places and displayed with adaptive precision.
 - **Change tracking**: covers write-file-like tool calls only; file changes made inside bash/pwsh cannot be captured reliably.
 - **Overview counts**: request count/cost/runtime are folded server-side from the session event log (`request/header`, `assistant/message` usage). Pre-plugin history sessions are back-filled on first access; runtime = time since the first request (includes idle time).
