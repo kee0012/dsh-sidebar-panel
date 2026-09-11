@@ -188,11 +188,13 @@ console.log('✓ module contract + route registration');
   const base = Date.UTC(2026, 7, 19, 2, 0, 0);
   const session = {
     id: sessionId,
-    events: [
-      { type: 'request/header', seq: 0, time: base, data: { header: { provider: 'deepseek-official', model: 'deepseek-chat' } } },
+    // dsh 0.1.3-alpha.1+: the Session exposes snapshots, not a public `.events`.
+    snapshotEvents: () => [
+      // The epoch header nests the route under `config` (EpochHeader.config).
+      { type: 'request/header', seq: 0, time: base, data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-chat' } } } },
       { type: 'step/start', seq: 1, time: base + 1, data: { turn: 0, step: 0 } },
       { type: 'assistant/message', seq: 2, time: base + 1000, data: { turn: 0, step: 0, usage: { inputTokens: 100, cacheReadTokens: 900, cacheWriteTokens: 0, outputTokens: 50 } } },
-      { type: 'request/header', seq: 3, time: base + 2000, data: { header: { provider: 'deepseek-official', model: 'deepseek-chat' } } },
+      { type: 'request/header', seq: 3, time: base + 2000, data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-chat' } } } },
       { type: 'step/start', seq: 4, time: base + 2001, data: { turn: 1, step: 0 } },
       { type: 'assistant/message', seq: 5, time: base + 3000, data: { turn: 1, step: 0, usage: { inputTokens: 200, cacheReadTokens: 800, cacheWriteTokens: 0, outputTokens: 30 } } },
       { type: 'tool/call', seq: 6, time: base + 4000, data: { name: 'write', arguments: { filePath: 'D:/x/a.ts' } } },
@@ -209,6 +211,11 @@ console.log('✓ module contract + route registration');
   assert.equal(data.overview.requestCount, 2);
   assert.equal(data.overview.byModel.length, 1);
   const m = data.overview.byModel[0];
+  // Route attribution must survive the header fold: reading provider/model off
+  // the header instead of header.config flattened every call into one
+  // "unknown/unknown" row and priced it with the default table.
+  assert.equal(m.provider, 'deepseek-official');
+  assert.equal(m.model, 'deepseek-chat');
   assert.equal(m.input, 100 + 900 + 200 + 800, 'input = uncached + cacheHit + cacheWrite');
   assert.equal(m.hit, 900 + 800);
   assert.equal(m.miss, 100 + 200);

@@ -13,7 +13,7 @@
  *
  * The overview cost uses a configurable pricing table with DeepSeek-style
  * peak/valley (off-peak) windows; request usage and timestamps are folded
- * from each session's durable event log (`session/event` + `session.events`),
+ * from each session's durable event log (`session/event` + `snapshotEvents()`),
  * the same mechanism the token-meter uses.
  */
 import { randomUUID } from 'node:crypto';
@@ -189,18 +189,25 @@ function extractWritePath(toolName, args, writeTools) {
 /** Incremental fold of one session's durable events (token-meter style). */
 function foldSession(session, config) {
   const st = stateOf(session);
-  const events = session.events;
+  // dsh 0.1.3-alpha.1+: Session has no public `.events`; snapshotEvents() returns
+  // an append-only snapshot, so the consumed-index incremental fold stays valid.
+  const events = session.snapshotEvents();
   while (st.consumed < events.length) {
     const event = events[st.consumed];
     st.consumed += 1;
     switch (event.type) {
       case 'request/header': {
+        // The epoch header nests the route: { config: { provider, model }, … }.
+        // Reading provider/model off the header directly yielded "unknown" for
+        // every request, which flattened the by-model table into one row and
+        // priced every call with the default table.
         const header = event.data?.header ?? {};
+        const route = header.config ?? {};
         st.requests.push({
           kind: 'request',
           time: eventTime(event),
-          provider: typeof header.provider === 'string' ? header.provider : 'unknown',
-          model: typeof header.model === 'string' ? header.model : 'unknown',
+          provider: typeof route.provider === 'string' ? route.provider : 'unknown',
+          model: typeof route.model === 'string' ? route.model : 'unknown',
         });
         break;
       }
