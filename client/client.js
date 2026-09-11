@@ -60,6 +60,17 @@
  * affordance stays reachable; the panel itself now simply stays in place,
  * because the column is no longer force-closed on a blank session.
  *
+ * Data sources: the 概览 projections (`tokenUsage` / `contextPressure`), the
+ * server-side folds, and the 文件/改动 tabs are unchanged — but the CHAT-derived
+ * half (the 工具 tab's call list and the output-budget card) now reads the
+ * Conversation snapshot's `chat` view slice
+ * (`useConversation(s => s.views.get('chat')).legacy`, registered by ui-chat).
+ * The earlier code read those off the SESSION snapshot, which has never carried
+ * `chat`/`nodes` on any core generation, so both surfaces were permanently
+ * empty; the session-side reads remain only as a last-resort fallback, and the
+ * tool-call scan also accepts 0.1.5's tool-result shape (head fields nested on
+ * `call`, which is null when the originating tool/call is outside the window).
+ *
  * The 工具 tab renders a self-built detail view rather than reusing per-tool
  * renderers: the shipped detail seat belongs to the framework's own right
  * Sidebar registration (declaring is claiming), and this plugin replaces that
@@ -309,11 +320,14 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
   /**
    * Most recent assistant request config's maxTokens (the newest message that
    * recorded a request config wins — walking backwards).
+   * 0.1.5 exposes it as `requestConfig` on the assistant node; older shapes
+   * carried a bare `config`, so both are accepted.
    */
   function walkNodesForMaxTokens(nodes) {
     for (var i = (nodes || []).length - 1; i >= 0; i--) {
       var n = nodes[i];
-      if (n && n.config && typeof n.config.maxTokens === "number") return n.config.maxTokens;
+      var cfg = n ? (n.requestConfig || n.config) : null;
+      if (cfg && typeof cfg.maxTokens === "number") return cfg.maxTokens;
     }
     return null;
   }
@@ -396,19 +410,53 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     return i < 0 ? "" : name.slice(i + 1).toLowerCase();
   }
 
-  function collectToolCalls(snapshot) {
+  /**
+   * The Chat view slice carrying settled tool calls and in-flight calls.
+   *
+   * It lives on the CONVERSATION snapshot (`views.get('chat')`, registered by
+   * ui-chat with target `chat`), NOT on the session snapshot: a SessionSnapshot
+   * holds lifecycle/queue state only on every core generation, so the earlier
+   * `useSession(...).chat / .nodes` reads were always undefined and both the
+   * 工具 tab and the output-budget card stayed empty. Both selectors are called
+   * unconditionally so the hook order never changes; the session-side reads
+   * stay as a last-resort fallback for unknown shapes.
+   * @param props - the tab's composed props (session- and global kit).
+   * @returns the Chat view's `legacy` slice, or null while unavailable.
+   */
+  function useChatSlice(props) {
+    var pickAll = function (value) { return value; };
+    var useConversation = typeof props.useConversation === "function" ? props.useConversation : pickAll;
+    var useSession = typeof props.useSession === "function" ? props.useSession : pickAll;
+    var conversation = useConversation(pickAll);
+    var session = useSession(pickAll);
+    var views = conversation ? conversation.views : null;
+    var chat = views && typeof views.get === "function" ? views.get("chat") : null;
+    if (chat && chat.legacy) return chat.legacy;
+    if (session && session.chat && session.chat.legacy) return session.chat.legacy;
+    if (session && Array.isArray(session.nodes)) return session;
+    return null;
+  }
+
+  function collectToolCalls(slice) {
     var list = [];
     var seen = {};
-    var nodes = snapshot && snapshot.chat ? snapshot.chat.legacy.nodes : (snapshot ? snapshot.nodes : []);
-    for (var i = 0; i < (nodes || []).length; i++) {
+    var nodes = slice && Array.isArray(slice.nodes) ? slice.nodes : [];
+    for (var i = 0; i < nodes.length; i++) {
       var n = nodes[i];
-      if (n && typeof n.callId === "string" && typeof n.name === "string" && typeof n.argsRaw === "string" && !seen[n.callId]) {
-        seen[n.callId] = true;
-        list.push({ callId: n.callId, name: n.name, argsRaw: n.argsRaw, block: n, time: n.time || 0, running: false });
-      }
+      if (!n || typeof n.callId !== "string" || seen[n.callId]) continue;
+      // A settled call is a `tool-result` node: its head (name / argsRaw) is
+      // backfilled onto `call`, and that head is null when window truncation
+      // left the originating tool/call outside the loaded window. Older shapes
+      // carried the same fields flat on the node.
+      var head = n.call && typeof n.call === "object" ? n.call : null;
+      var name = typeof n.name === "string" ? n.name : (head && typeof head.name === "string" ? head.name : null);
+      if (name === null) continue;
+      var argsRaw = typeof n.argsRaw === "string" ? n.argsRaw : (head && typeof head.argsRaw === "string" ? head.argsRaw : "");
+      seen[n.callId] = true;
+      list.push({ callId: n.callId, name: name, argsRaw: argsRaw, block: n, time: n.time || 0, running: false });
     }
-    var running = snapshot && snapshot.chat ? snapshot.chat.legacy.runningCalls : [];
-    for (var j = 0; j < (running || []).length; j++) {
+    var running = slice && Array.isArray(slice.runningCalls) ? slice.runningCalls : [];
+    for (var j = 0; j < running.length; j++) {
       var c = running[j];
       if (c && typeof c.callId === "string" && !seen[c.callId]) {
         seen[c.callId] = true;
@@ -685,8 +733,8 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     var [outputBudget, setOutputBudget] = React.useState(null);
     var [balance, setBalance] = React.useState(null);
     var [accountError, setAccountError] = React.useState(null);
-    var snapshot = props.useSession(function (s) { return s; });
-    var nodes = snapshot && snapshot.chat ? snapshot.chat.legacy.nodes : (snapshot ? snapshot.nodes : []);
+    var slice = useChatSlice(props);
+    var nodes = slice ? slice.nodes : null;
 
     // Live server-side figures (requests / cost / runtime / by-model): refetch
     // every 5s so the overview tracks the session in near-real time. Projection
@@ -1247,8 +1295,8 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
 
   function ToolsTab(props) {
     var t = props.t;
-    var snapshot = props.useSession(function (s) { return s; });
-    var calls = React.useMemo(function () { return collectToolCalls(snapshot); }, [snapshot]);
+    var slice = useChatSlice(props);
+    var calls = React.useMemo(function () { return collectToolCalls(slice); }, [slice]);
     var [selected, setSelected] = React.useState(null);
 
     React.useEffect(function () {
@@ -1384,6 +1432,7 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
         sessionId: props.sessionId,
         useProjection: props.useProjection,
         useSession: props.useSession,
+        useConversation: props.useConversation,
         t: t,
       });
     } else if (tab === "files") {
@@ -1396,7 +1445,11 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     } else if (tab === "changes") {
       body = React.createElement(ChangesTab, { sessionId: props.sessionId, t: t });
     } else {
-      body = React.createElement(ToolsTab, { useSession: props.useSession, t: t });
+      body = React.createElement(ToolsTab, {
+        useSession: props.useSession,
+        useConversation: props.useConversation,
+        t: t,
+      });
     }
 
     return React.createElement(
