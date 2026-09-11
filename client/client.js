@@ -1,45 +1,69 @@
 /**
  * dsh-sidebar-panel — browser half.
  *
- * Slot registrations:
+ * Slot registrations (one bundle, two core generations — the paths below are
+ * mutually exclusive because `ctx.slots.inject` only fires for a slot that the
+ * running core actually declares):
  *  1. `conversation.session.header.utilities` — the right-aligned session
  *     header utility row: a panel toggle styled like the sidebar fold button
- *     (open / collapse the right details column from the top-right).
- *  2. `details` — the right column itself, shadowing ui-conversation's
- *     DetailsPanel at a lower priority. The panel has four tabs:
- *     概览 (context/token/cost), 文件 (workspace file tree + context menu),
- *     改动 (files written this session), 工具 (tool calls in this window).
+ *     (open / collapse the right column from the top-right). Unchanged across
+ *     core generations.
+ *  2. `rightbar` (DSH >= 0.1.5) — the right column itself. 0.1.5 replaced the
+ *     session-scoped `details` column with a root-scoped `rightbar` column
+ *     occupied by the shipped right Sidebar
+ *     (`@deepseek-ai/dsh-client-ui-sidebar-right`). This plugin takes that
+ *     column over at `priority: -1` (shadowing ranks ascend and the LOWEST
+ *     renders, so a dynamically registered entry wins over the shipped one at
+ *     priority 0) and declares ONE Session-scoped child slot,
+ *     `dsh-sidebar-panel.session`. PanelRoot registers into that child, which
+ *     restores the full Session standard kit (sessionId, useSession,
+ *     useProjection, useInput, inputActions) — a root-scope entry cannot
+ *     receive those, which is exactly why the shipped occupant delegates to
+ *     `rightbar.session` through the injected `SessionProvider` seat, and why
+ *     RightbarHost below mirrors that pattern. Taking the column over also
+ *     retires the shipped Sidebar's own way in
+ *     (`conversation.session.header.corner`): that button only flips the
+ *     shipped per-session store, whose reporting seat stops rendering once we
+ *     own the column, so it would sit beside our live toggle doing nothing —
+ *     our priority -1 registration renders nothing there instead.
+ *  3. `details` (DSH < 0.1.5) — the legacy right column, kept as a second
+ *     registration so the same bundle still loads on older cores.
+ *     The panel has four tabs: 概览 (context/token/cost), 文件 (workspace file
+ *     tree + context menu), 改动 (files written this session), 工具 (tool calls
+ *     in this window).
  *
  * Persistence semantics: the open/collapsed state is a sticky preference
  * (`dshSidebarPanel:details-open`, default "open"). The panel stays open
  * across session switches and new-session engagements UNLESS the user
- * collapsed it themselves — the host framework calls closeDetails() on every
- * session change (and once more when a blank session engages), so PanelRoot
- * re-opens on sessionId/blank transitions while the preference is "open".
- * A manual collapse writes "closed" and is respected everywhere until the
- * user clicks open again.
+ * collapsed it themselves. PanelRoot re-opens on sessionId/blank transitions
+ * while the preference is "open", and a manual collapse writes "closed" — so
+ * the choice is respected everywhere until the user opens the panel again.
  *
- * Blank-session persistence: while the current session is blank (fresh "new
- * session" hero), the host layout force-hides the details column (AppFrame
- * computes the column width as 0) and hides the conversation header (the
- * top-right toggle vanishes with it). Slots cannot override either, so an
- * install-time controller (installBlankSessionController) takes over:
- *  - it injects ONE declarative CSS rule with `!important` — the frame grid
- *    becomes `<sidebar>px minmax(0, 1fr) 360px` — while blank && preference
- *    "open". `!important` deterministically beats the host's inline style on
- *    every render (no DOM rewriting, no observer races), and the three grid
- *    cells keep the panel structurally pinned to the right at fixed width:
- *    it can never go fullscreen or cover the chat area;
- *  - it renders a fixed top-right toggle visible ONLY during blank (same
- *    look as the header button), so the "open the panel" affordance never
- *    disappears and clicking it really opens/collapses (it also syncs the
- *    layout store so the choice survives blank -> engage);
- *  - once the session engages the keepalive rule is removed and the host
- *    takes over normally; the fixed button hides (header button is back).
+ * Column presentation: on 0.1.5 the right column is OCCUPANT-REPORTED — the
+ * frame sizes the track and places its resize handle from whatever the
+ * occupant reports through `ctx.layout`. The panel therefore asks for a normal
+ * (non-fullscreen) track with `openRightbar(true, false)` and releases it with
+ * `closeRightbar()`; on older cores the same transition is
+ * `openDetails()` / `closeDetails()`, and `reportPanel()` feature-detects the
+ * pair so one bundle serves both. Two pieces of the pre-0.1.5 implementation
+ * are gone with the old model: the `!important` grid-template-columns
+ * "keepalive" rule (the new frame no longer zeroes the column per session
+ * state, and a forced third track would fight the new geometry — RIGHTBAR_MIN
+ * 300px, 45% first-open preference, deterministic collapse when the room is
+ * gone) and the `data-details-collapsed` DOM probe (`isDetailsCollapsed()`
+ * now reads the `data-rightbar-collapsed` marker as well).
  *
- * The `conversation.details.tool` seat belongs to the shipped DetailsPanel
- * registration (declaring is claiming), so the 工具 tab renders a self-built
- * detail view instead of reusing the per-tool renderers.
+ * Blank-session affordance: while the current session is blank (fresh "new
+ * session" hero) the host still hides the conversation header, and the header
+ * utilities toggle with it. installBlankSessionController renders a fixed
+ * top-right toggle (same look as the header button) so the open/collapse
+ * affordance stays reachable; the panel itself now simply stays in place,
+ * because the column is no longer force-closed on a blank session.
+ *
+ * The 工具 tab renders a self-built detail view rather than reusing per-tool
+ * renderers: the shipped detail seat belongs to the framework's own right
+ * Sidebar registration (declaring is claiming), and this plugin replaces that
+ * occupant outright.
  */
 window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
   var module = { exports: {} };
@@ -295,12 +319,17 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
   }
 
   /**
-   * The AppFrame root carries `data-details-collapsed` exactly while the
-   * right details column is closed (width 0). Presence of the attribute is
-   * the cheapest reliable open/closed probe without the layout store handle.
+   * Open/closed probe over the frame's own marker attribute: cheap, and it
+   * follows ANY source of the transition (our buttons, the panel close button,
+   * a host-driven close), which is what the toggle icon must track.
+   *  - 0.1.5+: AppFrame carries `data-rightbar-collapsed` exactly while the
+   *    right column has no track (`cols.rightbar === 0`).
+   *  - legacy: `data-details-collapsed` played the same role.
    */
   function isDetailsCollapsed() {
-    return document.querySelector("[data-details-collapsed]") !== null;
+    if (document.querySelector("[data-rightbar-collapsed]") !== null) return true;
+    if (document.querySelector("[data-details-collapsed]") !== null) return true;
+    return false;
   }
 
   /* Open/collapsed preference ------------------------------------------ */
@@ -323,6 +352,32 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
 
   function setDetailsPref(value) {
     try { localStorage.setItem(DETAILS_PREF_KEY, value); } catch (_) {}
+  }
+
+  /**
+   * Report the right column's presentation to the layout, version-agnostically.
+   * 0.1.5 replaced the details-width model with an occupant report:
+   * `openRightbar(track, fullscreen)` claims a normal grid track for the
+   * column and `closeRightbar()` releases it; older cores had
+   * `openDetails()` / `closeDetails()` instead. Exactly one pair exists on a
+   * given core, so feature-detection keeps one bundle working on both.
+   * `track: true, fullscreen: false` is the historical details-column
+   * behaviour: a normal column beside the chat, never an overlay.
+   * @param ctx - plugin context carrying the `layout` service.
+   * @param open - true to show the column, false to release it.
+   */
+  function reportPanel(ctx, open) {
+    var layout = ctx.layout;
+    if (!layout) return;
+    try {
+      if (open) {
+        if (typeof layout.openRightbar === "function") layout.openRightbar(true, false);
+        else if (typeof layout.openDetails === "function") layout.openDetails();
+      } else {
+        if (typeof layout.closeRightbar === "function") layout.closeRightbar();
+        else if (typeof layout.closeDetails === "function") layout.closeDetails();
+      }
+    } catch (_) {}
   }
 
   /* File preview vocabulary -------------------------------------------- */
@@ -466,9 +521,10 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
   /* ------------------------------------------------------------------ */
 
   function ToggleDetailsButton(props) {
-    // The AppFrame root carries data-details-collapsed while the details
-    // column is closed; observe it so the icon/label track any open/close
-    // source (our button, the chat Inspect flow, the panel close button).
+    // The frame carries the collapse marker (data-rightbar-collapsed on
+    // 0.1.5+, data-details-collapsed before that); observe both so the
+    // icon/label track any open/close source (our button, the panel's own
+    // close button, a host-driven close).
     var [collapsed, setCollapsed] = React.useState(isDetailsCollapsed);
 
     React.useEffect(function () {
@@ -477,7 +533,7 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
       });
       observer.observe(document.body, {
         attributes: true,
-        attributeFilter: ["data-details-collapsed"],
+        attributeFilter: ["data-details-collapsed", "data-rightbar-collapsed"],
         subtree: true,
       });
       return function () { observer.disconnect(); };
@@ -510,30 +566,23 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
   }
 
   /**
-   * Blank-session persistence controller (see the module doc). Runs once at
+   * Blank-session affordance controller (see the module doc). Runs once at
    * apply time, outside any slot:
-   *  - While the CURRENT session is blank and the preference is "open", the
-   *    host AppFrame computes the details column as 0px. Instead of touching
-   *    the host's inline style (which fights React's render ownership and can
-   *    corrupt the grid — the old approach), this injects ONE declarative CSS
-   *    rule with `!important`: the frame grid becomes
-   *    `<sidebar>px minmax(0, 1fr) 360px`. `!important` always beats the host
-   *    inline style, so every host re-render is overridden deterministically
-   *    with no observer race; the three columns are real grid cells, so the
-   *    panel is structurally pinned to the right at fixed width and can never
-   *    cover the chat area.
    *  - A fixed top-right toggle (same look as the header button) is shown
    *    ONLY during blank, when the host hides the conversation header and
    *    the header toggle with it. Clicking it flips the preference AND the
-   *    layout store (openDetails/closeDetails), so the choice survives the
-   *    blank -> engage transition consistently.
-   *  - Once the session engages, the keepalive rule is removed and the host
-   *    re-renders with the store width and takes over normally; the fixed
-   *    button hides (header button back).
+   *    layout report, so the choice survives the blank -> engage transition
+   *    consistently.
+   *  - Once the session engages, the fixed button hides (header button back).
+   *
+   * The pre-0.1.5 version also injected an `!important`
+   * grid-template-columns rule to keep a details column the old frame
+   * force-closed on a blank session. That is deliberately gone: 0.1.5 makes
+   * the right column occupant-reported, the frame no longer zeroes it from
+   * session state, and a forced third track would fight the new geometry
+   * (RIGHTBAR_MIN 300px, 45% first-open preference, deterministic collapse
+   * when the room is gone).
    */
-  var FRAME_SELECTOR = "div[data-details-collapsed]";
-  var BLANK_DETAILS_WIDTH = 360;
-  var KEEPALIVE_STYLE_ID = STYLE_ID + "-blank-keepalive";
 
   function currentSessionBlank(sessions) {
     try {
@@ -543,34 +592,6 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     } catch (_) {
       return false;
     }
-  }
-
-  /**
-   * Inject the declarative three-column keepalive rule. Reads the current
-   * sidebar width from the frame's inline grid (the host always writes the
-   * real sidebar column) so the rule mirrors the user's sidebar preference;
-   * re-run whenever the host re-renders (sidebar drag, viewport change).
-   */
-  function applyBlankKeepalive() {
-    var sidebarPx = 280;
-    var frame = document.querySelector(FRAME_SELECTOR);
-    if (frame !== null) {
-      var grid = frame.style.gridTemplateColumns;
-      var m = typeof grid === "string" ? /^\s*(\d+(?:\.\d+)?)px/.exec(grid) : null;
-      if (m !== null) sidebarPx = parseFloat(m[1]);
-    }
-    var style = document.getElementById(KEEPALIVE_STYLE_ID);
-    if (style === null) {
-      style = document.createElement("style");
-      style.id = KEEPALIVE_STYLE_ID;
-      document.head.appendChild(style);
-    }
-    style.textContent = FRAME_SELECTOR + " { grid-template-columns: " + sidebarPx + "px minmax(0, 1fr) " + BLANK_DETAILS_WIDTH + "px !important; }";
-  }
-
-  function removeBlankKeepalive() {
-    var style = document.getElementById(KEEPALIVE_STYLE_ID);
-    if (style !== null) style.remove();
   }
 
   function fixedToggleLabel() {
@@ -611,11 +632,6 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     function sync() {
       var blank = currentSessionBlank(sessions);
       var open = getDetailsPref() === "open";
-      if (blank && open) {
-        applyBlankKeepalive();
-      } else {
-        removeBlankKeepalive();
-      }
       if (button === null) return;
       if (blank) {
         if (!button.isConnected) document.body.appendChild(button);
@@ -631,15 +647,6 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     // Blank flag changes (new session, blank -> engage) drive the sync.
     var unsubscribe = sessions.list.subscribe(sync);
 
-    // The host re-renders the grid (sidebar drag, viewport, …): refresh the
-    // keepalive rule's sidebar width so it always mirrors the live layout.
-    var observer = new MutationObserver(function () {
-      if (currentSessionBlank(sessions) && getDetailsPref() === "open") {
-        applyBlankKeepalive();
-      }
-    });
-    observer.observe(document.body, { attributes: true, attributeFilter: ["style"], subtree: true });
-
     // Fixed top-right toggle (blank only).
     button = document.createElement("button");
     button.type = "button";
@@ -650,11 +657,8 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
       if (!currentSessionBlank(sessions)) return;
       var next = getDetailsPref() === "open" ? "closed" : "open";
       setDetailsPref(next);
-      // Keep the layout store in sync so the choice survives blank -> engage.
-      try {
-        if (next === "open") ctx.layout.openDetails();
-        else ctx.layout.closeDetails();
-      } catch (_) {}
+      // Keep the column report in sync so the choice survives blank -> engage.
+      reportPanel(ctx, next === "open");
       sync();
     });
 
@@ -662,8 +666,6 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
 
     return function () {
       unsubscribe();
-      observer.disconnect();
-      removeBlankKeepalive();
       if (button !== null && button.isConnected) button.remove();
     };
   }
@@ -1301,6 +1303,35 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
   }
 
   /* ------------------------------------------------------------------ */
+  /* Right column host (0.1.5+ `rightbar` occupant)                      */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Root-scope occupant of the `rightbar` column. It owns no panel state and
+   * no columns CSS: the frame keeps the grid, and the column width comes from
+   * whatever the panel reports through `ctx.layout` (`openRightbar` /
+   * `closeRightbar`). Its only job is to hand that geometry through and render
+   * the Session-scoped child slot, which the framework binds to the current
+   * Conversation through the injected `SessionProvider` seat — the same
+   * pattern the shipped right Sidebar uses, and the only way a root-scope
+   * entry can host Session-scoped content.
+   *
+   * `usePanelInfo` is deliberately NOT consulted: the shipped Sidebar hides
+   * its body while a global main panel (Settings, …) is selected and releases
+   * the track with it, whereas this plugin's contract is a right column that
+   * stays put for the whole page.
+   */
+  function RightbarHost(props) {
+    var body = props.renderSlot("dsh-sidebar-panel.session", {
+      width: props.width,
+      viewportWidth: props.viewportWidth,
+      canShow: props.canShow,
+    });
+    var Provider = props.SessionProvider;
+    return Provider ? React.createElement(Provider, null, body) : body;
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Panel root                                                          */
   /* ------------------------------------------------------------------ */
 
@@ -1325,15 +1356,15 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
       } catch (_) {}
     }, [props.sessionId]);
 
-    // Re-open the panel whenever the session changes or a blank session
-    // engages, while the preference is "open". The host AppFrame closes the
-    // details column on EVERY session switch (useLayoutEffect closeDetails)
-    // and once more the moment a blank session engages — and the details
-    // seat does NOT remount on that blank→engage transition (same session
-    // id), so a mount-only auto-open would leave the panel dead. This effect
-    // runs as a passive effect, i.e. after the host's layout-phase close, so
-    // the re-open lands cleanly. A manual collapse writes the preference to
-    // "closed" and is respected everywhere until the user opens again.
+    // Re-open the column whenever the session changes or a blank session
+    // engages, while the preference is "open". The host may close the column
+    // on its own (a session switch, a responsive collapse when the room is
+    // gone), and the occupant does NOT remount on the blank->engage transition
+    // (same session id), so a mount-only auto-open would leave the panel dead.
+    // This effect runs as a passive effect, i.e. after the host's layout-phase
+    // close, so the re-open lands cleanly. A manual collapse writes the
+    // preference to "closed" and is respected everywhere until the user opens
+    // again.
     React.useEffect(function () {
       if (getDetailsPref() !== "open") return;
       if (typeof props.openPanel === "function") {
@@ -1436,32 +1467,81 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
         locale: NS,
         inject: function () {
           return {
-            openPanel: function () { ctx.layout.openDetails(); },
-            closePanel: function () { ctx.layout.closeDetails(); },
+            openPanel: function () { reportPanel(ctx, true); },
+            closePanel: function () { reportPanel(ctx, false); },
           };
         },
       }, ToggleDetailsButton);
     });
 
+    // The panel's business face: the Session's workspace root plus the two
+    // column transitions. Shared by the Session-scoped child registration
+    // (0.1.5+) and the legacy `details` registration below.
+    function panelInject(sessionId) {
+      var sessions = ctx.get("sessions");
+      var cwd = null;
+      if (sessions) {
+        var byId = sessions.list.getSnapshot().byId;
+        if (byId && byId[sessionId]) cwd = byId[sessionId].cwd || null;
+      }
+      return {
+        cwd: cwd,
+        openPanel: function () { reportPanel(ctx, true); },
+        closePanel: function () { reportPanel(ctx, false); },
+      };
+    }
+
+    // DSH 0.1.5+: occupy the root-scoped `rightbar` column at priority -1
+    // (lowest renders, so this shadows the shipped right Sidebar) and declare
+    // the Session-scoped child slot the panel body registers into. Both
+    // registrations are required: an entry that declares children must render
+    // them, and the root scope cannot supply the Session standard kit.
+    ctx.slots.inject("rightbar", function () {
+      var disposeSeat = ctx.slots.register({
+        name: "rightbar",
+        priority: -1,
+        children: {
+          "dsh-sidebar-panel.session": { kind: "single", scope: "session" },
+        },
+      }, RightbarHost);
+
+      // The shipped Sidebar's own way in (the conversation header's corner
+      // seat) only flips ITS per-session store, and the seat that reports that
+      // store to the layout no longer renders once this plugin owns the column
+      // — it would be a dead button beside our live one. Retire it: the
+      // utilities toggle above owns the transition. Registered from inside the
+      // `rightbar` callback so it applies exactly on the generation that has
+      // this seat.
+      var disposeCorner = ctx.slots.inject("conversation.session.header.corner", function () {
+        return ctx.slots.register({
+          name: "conversation.session.header.corner",
+          priority: -1,
+        }, function () { return null; });
+      });
+
+      return function () {
+        disposeCorner();
+        disposeSeat();
+      };
+    });
+
+    ctx.slots.inject("dsh-sidebar-panel.session", function () {
+      return ctx.slots.register({
+        name: "dsh-sidebar-panel.session",
+        locale: NS,
+        inject: panelInject,
+      }, PanelRoot);
+    });
+
+    // DSH < 0.1.5: the same panel as the Session-scoped right column. Only one
+    // of the two paths ever fires — a slot must be declared to inject.
     ctx.slots.inject("details", function () {
       return ctx.slots.register({
         name: "details",
         id: "dsh-sidebar-panel",
         priority: -1,
         locale: NS,
-        inject: function (sessionId) {
-          var sessions = ctx.get("sessions");
-          var cwd = null;
-          if (sessions) {
-            var byId = sessions.list.getSnapshot().byId;
-            if (byId && byId[sessionId]) cwd = byId[sessionId].cwd || null;
-          }
-          return {
-            cwd: cwd,
-            openPanel: function () { ctx.layout.openDetails(); },
-            closePanel: function () { ctx.layout.closeDetails(); },
-          };
-        },
+        inject: panelInject,
       }, PanelRoot);
     });
   }
