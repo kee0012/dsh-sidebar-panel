@@ -1,25 +1,29 @@
 # dsh-sidebar-panel
 
-A **right-side panel plugin** for DSH (DeepSeek Harness, Web profile). It adds a panel toggle button at the **top-right of the session header** (styled like the built-in left fold button) that expands/collapses the right `details` column. The panel **stays open by default and survives session switches** — it only collapses when the user clicks the collapse button (the collapsed state is remembered). It has four tabs:
+A **right-column tab plugin** for DSH (DeepSeek Harness, Web profile). It registers a page type and its body through the shipped right column's tab registry (`ctx.sidebarRightTabs`), so it sits **beside** the built-in **Files / Document preview / Guide** tabs — it never takes the column over, never replaces a shipped tab and never writes a grid or width rule. A toggle at the **top-right of the session header** (styled like the built-in left fold button) opens or focuses the tab, and collapses the column when the plugin's tab is already in front. The panel itself has four tabs:
 
 - **Overview**: a **DeepSeek account** card at the top — official balance (fetched live from `GET https://api.deepseek.com/user/balance`, refreshed every 15 s) and a **Top Up** button (https://platform.deepseek.com/usage). Below it: context window (used/total/percent/distance-to-compaction), current turn's context budget (prompt/output budget, physical headroom, output-cap source), session metrics (hit rate / **session cost** / runtime / request count / total tokens), and usage analysis (by source / by type, with input-output and cache hit-miss breakdown). Server-side data refreshes every 5 s ("updated at HH:MM:SS" in the corner); projected data (tokens/context) reacts in real time.
 - **Files**: a file tree of the current session's workspace. **Click a file to preview** (md/txt/code inline; PDF and images embedded; truncation notice for large files). **Right-click menu**: reveal in file manager, add file reference / add file content (file), add folder reference (folder), copy absolute path / copy relative path. Inserted content is written into the chat input box.
 - **Changes**: files touched by write-like tools (write/edit/str-replace-editor, …) in the current session.
 - **Tools**: the tool calls in the current window with argument/result details (self-built view).
 
-> **Compatibility**: Web profile only. Custom same-origin HTTP routes are not available in the desktop (Electron) build.
+> **Compatibility**: 0.1.5 or newer, **Web profile**. The plugin needs two things from the tree it is loaded into: the host's `ctx.webServer` (same-origin HTTP routes) and the client-side right-column tab registry (`ctx.sidebarRightTabs`, shipped in 0.1.5). A desktop shell that boots this same web profile works — the routes are served exactly as in a browser; a shell without the web server does not.
 
 ## Layout
 
 ```
 dsh-sidebar-panel/
-├── package.json          # DSH bundle manifest + client injection declaration
-├── cordis.patch.yml      # inserts the plugin into the DSH composition layer
-├── src/index.js          # server: same-origin HTTP API + session-event folding (usage/cost/changes) + file browsing + reveal
-├── client/client.js      # browser: top-right toggle + details-column panel (persistent, auto-reopen, blank-state DOM keep-alive) + four tabs + context menu
-├── test/unit.test.mjs    # server unit tests (mocked ctx, no DSH instance, no machine-specific paths)
+├── package.json             # DSH bundle manifest + client injection declaration + test scripts
+├── cordis.patch.yml         # inserts the plugin into the DSH composition layer
+├── src/index.js             # server: same-origin HTTP API + incremental session-event folding (usage/cost/changes) + file browsing + reveal
+├── client/client.js         # browser: right-column tab (type + body) + header toggle + four tabs + context menu
+├── test/unit.test.mjs       # server unit tests (mocked ctx, no DSH instance, no machine-specific paths)
+├── test/smoke.client.mjs    # client smoke: stub runtime asserting registration shape / navigation / chat slice
+├── SECURITY.md              # credential and network-surface notes (incl. the scanner false positives)
 └── README.md / README_EN.md
 ```
+
+> **Right-column contract**: since 0.1.5 the column is owned by the shipped `@deepseek-ai/dsh-client-ui-sidebar-right`, which exposes a tab registry. A type from outside the product registers in **two stages** — `ctx.sidebarRightTabs.register({ id, kind, priority: 'extension', title, guide })` defines the type, then its body goes into the keyed `sidebar.right.pane.tab` seat under the same `id`. This plugin takes exactly that path (as do the shipped `files`, `documentpreview` and `guide` types), so it neither needs nor wants to shadow the `rightbar` slot.
 
 > **Dependencies**: the server depends on `@deepseek-ai/schemastery` (config schema) and `@deepseek-ai/dsh-credentials` (resolves the `DEEPSEEK_API_KEY` credential); both are provided by the DSH runtime. `pnpm pack` output does not include `node_modules`; when developing from source, run `pnpm install` in the plugin directory to resolve dependencies.
 
@@ -84,15 +88,14 @@ Add a `config` block to the plugin entry in the DSH composition config (all defa
 ## Development & testing
 
 ```sh
-# Syntax checks
-node --check src/index.js && node --check client/client.js
+pnpm install          # resolves @deepseek-ai/schemastery and @deepseek-ai/dsh-credentials
+npm run check         # syntax checks (client + server)
+npm test              # unit tests + client smoke
+npm run test:unit     # node test/unit.test.mjs
+npm run test:smoke    # node test/smoke.client.mjs
 
-# Server unit tests (mocked ctx: routes / same-origin / file tree / path-escape lock /
-# overview folding / peak-valley pricing / change tracking)
-node test/unit.test.mjs
-
-# API smoke tests (GET sends no Origin header — same-origin browser GETs don't;
-# POST smoke tests must carry an Origin header)
+# API smoke tests against a live instance (adjust the port; GET sends no Origin
+# header — same-origin browser GETs don't; POST smoke tests must carry Origin)
 curl "http://127.0.0.1:3080/dsh-sidebar-panel/api/config"
 curl -H "Origin: http://127.0.0.1:3080" -H "Content-Type: application/json" -X POST \
   -d '{"root":"<your-workspace>","path":"dsh-sidebar-panel/package.json"}' \
@@ -101,9 +104,10 @@ curl -H "Origin: http://127.0.0.1:3080" -H "Content-Type: application/json" -X P
 
 ## Known limitations
 
-- **Details-column replacement**: the plugin shadows the built-in DetailsPanel at `priority: -1` (a single slot allows one renderer). The built-in "tool details" seat (`conversation.details.tool`) is claimed by its own registration and cannot be reused, so the **Tools** tab renders a self-built detail view; the Inspect button in chat still opens the right column but does not auto-select a tool.
-- **Open/collapsed preference (persistent)**: panel state is stored in browser localStorage (`dshSidebarPanel:details-open`), default `open`. **Session switches and new sessions do NOT auto-collapse it**: the host framework calls `closeDetails()` on every session switch (and once more when a blank session engages), and the plugin detects the session/blank transition and re-opens automatically — until the user collapses it themselves (recorded as `closed`, respected across all switches until they click open again).
-- **Panel stays resident during the blank (new-session hero) state**: the host layout forces the details column width to 0 and hides the whole conversation header (top-right toggle included) while the current session is blank. While blank and the preference is "open", the plugin injects a **single declarative CSS rule** (`!important`, three columns: `<sidebar>px | chat minmax(0,1fr) | panel 360px`) — it never touches the host's inline style or fights React rendering, so no host re-render can override it; the three columns are real grid cells, so the panel is structurally pinned to the right at fixed width and can never go fullscreen or cover the chat area. It also renders an identical fixed toggle at the **same top-right position** (visible only during blank; clicking it opens/collapses for real and syncs the layout store). Once the session engages, the rule is removed, the host resumes normal control, and the fixed button hides as the header button returns.
+- **Coexists with the shipped tabs**: the plugin is one tab of the right column, and the built-in **Files / Document preview / Guide** tabs keep working. Because it no longer shadows `rightbar` at `priority: -1`, it also no longer needs the corner dead-button handling, the blank-state grid hack or the `data-details-collapsed` DOM probe.
+- **The Tools tab is a self-built detail view**: the built-in right column's "tool details" seat belongs to its own registration and cannot be reused, so tool calls are drawn by this plugin; the Inspect button in chat goes through the built-in column and does not select this plugin's tab.
+- **The column's open/closed state belongs to the shipped Sidebar**: whether the column is expanded and which tabs it holds are per-session store state owned by the shipped Sidebar, so each session restores its own tab strip. The plugin no longer writes a `localStorage` open/collapsed preference; it only remembers which of its own four tabs was selected, per session.
+- **During the blank (new-session hero) state**: the host hides the whole conversation header, so the top-right toggle hides with it — the same behaviour the shipped tabs have. The tab can still be opened from the column's own guide page.
 - **Cost matching**: costs are estimates driven by the pricing table; amounts are transmitted with 6 decimal places and displayed with adaptive precision.
 - **Change tracking**: covers write-file-like tool calls only; file changes made inside bash/pwsh cannot be captured reliably.
 - **Overview counts**: request count/cost/runtime are folded server-side from the session event log (`request/header`, `assistant/message` usage). Pre-plugin history sessions are back-filled on first access; runtime = time since the first request (includes idle time).

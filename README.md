@@ -9,7 +9,7 @@ DSH（DeepSeek Harness，Web profile）**右侧栏的一个页签插件**：通�
 - **改动**：本次会话中写文件类工具（write/edit/str-replace-editor 等）触碰过的文件列表。
 - **工具**：本窗口内的工具调用列表与参数/结果详情（自建渲染）。
 
-> **兼容性**：仅支持 DSH 的 **Web profile**（HTTP 同源路由）；desktop（Electron）形态下自定义 HTTP 路由不可用。
+> **兼容性**：需 DSH **0.1.5+** 的 **Web profile**。插件依赖所加载环境提供两样东西：宿主的 `ctx.webServer`（同源 HTTP 路由）与客户端的右栏页签注册表（`ctx.sidebarRightTabs`，0.1.5 起随右栏一起提供）。启动的是同一套 Web profile 的桌面外壳同样可用（路由与浏览器中一致）；没有 web server 的外壳不可用。
 
 ## 目录结构
 
