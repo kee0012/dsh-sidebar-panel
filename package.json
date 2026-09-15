@@ -1,7 +1,7 @@
 {
   "name": "dsh-sidebar-panel",
-  "version": "0.2.0",
-  "description": "DSH (DeepSeek Harness) right-side panel plugin: overview (context/cost/usage), files (workspace tree + right-click reference/copy/reveal), changes (files written this session), tools (tool-call details).",
+  "version": "0.3.0",
+  "description": "DSH (DeepSeek Harness) right-side panel plugin: a tab of the shipped right column with overview (context/cost/usage), files (workspace tree + right-click reference/copy/reveal), changes (files written this session) and tools (tool-call details).",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -24,8 +24,8 @@
   },
   "main": "./src/index.js",
   "dependencies": {
-    "@deepseek-ai/schemastery": "3.18.1",
-    "@deepseek-ai/dsh-credentials": "0.1.0-rc.7"
+    "@deepseek-ai/schemastery": "3.18.2",
+    "@deepseek-ai/dsh-credentials": "0.1.5-rc.1"
   },
   "exports": {
     ".": "./src/index.js",
@@ -40,13 +40,12 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-layout",
-        "@deepseek-ai/dsh-client-ui-sidebar",
-        "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-ui-primitives"
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-slots"
       ]
     }
   },
@@ -56,9 +55,13 @@
     "cordis.patch.yml",
     "README.md",
     "README_EN.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "scripts": {
-    "check": "node --check src/index.js && node --check client/client.js"
+    "check": "node --check src/index.js && node --check client/client.js",
+    "test": "node test/unit.test.mjs && node test/smoke.client.mjs",
+    "test:unit": "node test/unit.test.mjs",
+    "test:smoke": "node test/smoke.client.mjs"
   }
 }

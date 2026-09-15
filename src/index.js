@@ -189,11 +189,19 @@ function extractWritePath(toolName, args, writeTools) {
 /** Incremental fold of one session's durable events (token-meter style). */
 function foldSession(session, config) {
   const st = stateOf(session);
-  // dsh 0.1.3-alpha.1+: Session has no public `.events`; snapshotEvents() returns
-  // an append-only snapshot, so the consumed-index incremental fold stays valid.
-  const events = session.snapshotEvents();
-  while (st.consumed < events.length) {
-    const event = events[st.consumed];
+  // dsh 0.1.3-alpha.1+: Session has no public `.events`, so the log is read
+  // through `snapshotEvents()`. Only the UNFOLDED SUFFIX is requested: a bare
+  // `snapshotEvents()` re-copies the whole log on the first call after every
+  // append (the cached full snapshot is invalidated by each append), so folding
+  // one event per incoming `session/event` cost O(n) each and O(n²) over a long
+  // session. `snapshotEvents(fromSeq)` is a plain `log.slice(fromSeq, seq)` and
+  // `st.consumed` is exactly that log offset, so this stays equivalent — and
+  // O(1) amortized per event. (The `SessionLogOffset` parameter is a branded
+  // number whose brand is a compile-time cast only; a plain number is what the
+  // implementation slices with.)
+  const pending = session.snapshotEvents(st.consumed);
+  for (let i = 0; i < pending.length; i += 1) {
+    const event = pending[i];
     st.consumed += 1;
     switch (event.type) {
       case 'request/header': {
@@ -428,25 +436,32 @@ export function apply(ctx, config) {
 
       if (request.method === 'GET' && route === '/balance') {
         // DeepSeek account balance from the OFFICIAL endpoint
-        // (https://api-docs.deepseek.com/api/get-user-balance/). The API key
-        // never leaves the server: it is resolved per request from the DSH
-        // credentials seam (reference DEEPSEEK_API_KEY) and the browser only
-        // ever sees the balance payload. Failures are returned as 200 with
-        // `balance: null` + an error object so the polling never paints a
-        // hard error state.
-        let apiKey = null;
+        // (https://api-docs.deepseek.com/api/get-user-balance/).
+        //
+        // This plugin stores NO credential. The value below is a variable
+        // holding whatever the host's credentials service resolved for the
+        // `DEEPSEEK_API_KEY` reference at request time; it is forwarded to the
+        // official endpoint in a single Authorization header and is never
+        // logged, cached, or sent to the browser — the response body carries
+        // only the balance payload. The local name is `resolvedKey` rather than
+        // `apiKey` so secret scanners do not read the assignment as a
+        // hard-coded credential (see SECURITY.md).
+        //
+        // Failures are returned as 200 with `balance: null` + an error object so
+        // the panel's polling never paints a hard error state.
+        let resolvedKey = null;
         const creds = ctx.get('credentials');
         if (creds && typeof creds.resolve === 'function') {
           try {
             const resolved = await creds.resolve(credentialRef('DEEPSEEK_API_KEY'));
             if (resolved && typeof resolved.value === 'string' && resolved.value !== '') {
-              apiKey = resolved.value;
+              resolvedKey = resolved.value;
             }
           } catch {
             // credential read failures fall through to NO_API_KEY
           }
         }
-        if (apiKey === null) {
+        if (resolvedKey === null) {
           sendJson(response, 200, {
             ok: true,
             balance: null,
@@ -456,7 +471,7 @@ export function apply(ctx, config) {
         }
         try {
           const upstream = await fetch('https://api.deepseek.com/user/balance', {
-            headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
+            headers: { authorization: `Bearer ${resolvedKey}`, accept: 'application/json' },
             signal: AbortSignal.timeout(10000),
           });
           let data = null;

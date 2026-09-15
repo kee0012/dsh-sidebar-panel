@@ -1,6 +1,6 @@
 <img width="3084" height="1670" alt="image" src="https://github.com/user-attachments/assets/a8c1651d-6477-4b8a-8614-be53e062cf69" /># dsh-sidebar-panel
 
-DSH（DeepSeek Harness，Web profile）的**右侧面板插件**：在**会话头部右上角**新增一个面板折叠按钮（样式与左侧折叠按钮一致），点击展开/收起右侧 `details` 列；面板**常驻并保持打开**——默认打开，切换会话/新建会话不会自动收起，直到用户自己点击收起按钮（收起状态会被记住）。面板包含四个页签：
+DSH（DeepSeek Harness，Web profile）**右侧栏的一个页签插件**：通过官方右栏的页签注册接口（`ctx.sidebarRightTabs`）注册一个页面类型与它的正文，与内置的**文件 / 文档预览 / 引导**页签**并存**——不接管右栏、不顶替任何内置页签、不写任何网格或宽度规则。会话头部右上角另有一个与左侧折叠按钮同款的开关，点击打开/聚焦本页签（已在前台则收起右栏）。面板自身包含四个页签：
 
 - **概览**：
 - **DeepSeek 账户**卡片——官方余额（经 `GET https://api.deepseek.com/user/balance` 实时查询，15 秒刷新）与 **充值按钮**（跳转 https://platform.deepseek.com/usage）；
@@ -15,13 +15,17 @@ DSH（DeepSeek Harness，Web profile）的**右侧面板插件**：在**会话�
 
 ```
 dsh-sidebar-panel/
-├── package.json          # DSH bundle 清单 + client 注入声明
-├── cordis.patch.yml      # 把插件插入 DSH 组合层
-├── src/index.js          # 服务端：同源 HTTP API + 会话事件折叠（用量/费用/改动）+ 文件浏览 + reveal
-├── client/client.js      # 客户端：右上角折叠按钮 + details 列面板（常驻、自动重开、blank 期 DOM 保活）+ 四页签 + 右键菜单
-├── test/unit.test.mjs    # 服务端单元测试（mock ctx，无需 DSH 实例，不依赖具体路径）
+├── package.json             # DSH bundle 清单 + client 注入声明 + 测试脚本
+├── cordis.patch.yml         # 把插件插入 DSH 组合层
+├── src/index.js             # 服务端：同源 HTTP API + 会话事件增量折叠（用量/费用/改动）+ 文件浏览 + reveal
+├── client/client.js         # 客户端：注册右栏页签（类型 + 正文）+ 头部开关 + 四页签 + 右键菜单
+├── test/unit.test.mjs       # 服务端单元测试（mock ctx，无需 DSH 实例，不依赖具体路径）
+├── test/smoke.client.mjs    # 客户端冒烟：桩运行时断言注册形状 / 导航行为 / chat 切片
+├── SECURITY.md              # 凭据与网络面说明（含扫描误报的逐条说明）
 └── README.md / README_EN.md
 ```
+
+> **右栏契约**：0.1.5 起右栏由官方包 `@deepseek-ai/dsh-client-ui-sidebar-right` 占据，并对外提供页签注册接口。第三方类型的正式接入方式是两段式注册——`ctx.sidebarRightTabs.register({ id, kind, priority: 'extension', title, guide })` 定义类型，再把正文注册进按键位 `sidebar.right.pane.tab`（`key` 与 `id` 相同）。本插件走的就是这条路径（内置的 `files` / `documentpreview` / `guide` 也是），因此**不需要也不应该**去抢占 `rightbar` 插槽。
 
 > **依赖**：服务端依赖 `@deepseek-ai/schemastery`（配置 schema）与 `@deepseek-ai/dsh-credentials`（读取 `DEEPSEEK_API_KEY` 凭据），二者由 DSH 运行时提供。`pnpm pack` 产物不含 `node_modules`；以源码方式开发时，在插件目录执行 `pnpm install` 即可解析依赖。
 
@@ -85,13 +89,13 @@ dsh plugin --profile web add dsh-sidebar-panel
 ## 开发与测试
 
 ```sh
-# 语法检查
-node --check src/index.js && node --check client/client.js
+pnpm install          # 解析 @deepseek-ai/schemastery 与 @deepseek-ai/dsh-credentials
+npm run check         # 语法检查（client 与 server）
+npm test              # 单元测试 + 客户端冒烟
+npm run test:unit     # node test/unit.test.mjs
+npm run test:smoke    # node test/smoke.client.mjs
 
-# 服务端单元测试（mock ctx，覆盖路由/跨域/文件树/越界锁定/概览折叠/峰谷计价/改动追踪）
-node test/unit.test.mjs
-
-# API 冒烟测试（GET 无需 Origin 头，浏览器同源 GET 本就不带 Origin；POST 冒烟请带 Origin）
+# 真实实例的 API 冒烟（端口按你的实例改；GET 同源不带 Origin，POST 冒烟请带 Origin）
 curl "http://127.0.0.1:3080/dsh-sidebar-panel/api/config"
 curl -H "Origin: http://127.0.0.1:3080" -H "Content-Type: application/json" -X POST \
   -d '{"root":"<你的工作区>","path":"dsh-sidebar-panel/package.json"}' \
@@ -100,9 +104,10 @@ curl -H "Origin: http://127.0.0.1:3080" -H "Content-Type: application/json" -X P
 
 ## 已知限制
 
-- **details 列替换**：插件以 `priority: -1` 顶替内置 DetailsPanel（单槽位只能有一个渲染者）。内置面板的"工具详情"座（`conversation.details.tool`）属于其自身声明，插件无法复用，故"工具"页签为自建详情视图；聊天里的 Inspect 按钮仍会打开右侧列，但不会自动选中工具。
-- **开合偏好（常驻）**：面板开合状态存于浏览器 localStorage（`dshSidebarPanel:details-open`），默认 `open`。**切会话/新建会话不会自动收起**：宿主框架在切换会话（及 blank 会话首次发言 engage）时会调用 `closeDetails()` 收起 details 列，插件检测到会话/blank 变化后会自动重开，直到用户主动点击收起/关闭（记为 `closed`，此后所有切换都保持收起，直到再次点击打开）。
-- **blank（新建会话 hero）期间面板也常驻**：宿主布局在 blank 状态下会把 details 列宽强制为 0、并隐藏整个会话 header（右上角按钮随之消失）。插件只注入**一条声明式 CSS 规则**（`!important`，三列：`<侧栏>px | 聊天区 minmax(0,1fr) | 面板 360px`）在 blank 且偏好为打开时生效——不触碰宿主内联样式、不与 React 渲染竞争，宿主任何重渲染都无法覆盖；三列是真实 grid 单元格，面板**结构性固定在右侧固定宽度**，不可能全屏或遮挡聊天区。同时在**右上角原位**渲染同款固定折叠按钮（仅 blank 期间显示，点击真实开合并同步布局状态）；会话正式启用后规则移除、宿主恢复正常接管，固定按钮自动隐藏、右上角 header 按钮回归。
+- **与内置页签并存**：本插件是右栏的一个页签，内置的**文件 / 文档预览 / 引导**保持可用。它不再以 `priority: -1` 顶替右栏，因此也不再需要 corner 死按钮处理、blank 期网格 hack 或 `data-details-collapsed` DOM 探针。
+- **「工具」页签为自建详情视图**：内置右栏的"工具详情"座属于其自身声明，插件无法复用，故工具调用由插件自绘；聊天里的 Inspect 按钮走内置右栏，不会自动选中本插件的页签。
+- **开合状态由官方右栏掌管**：右栏是否展开、有哪些页签，都是官方右栏的 per-session store 状态，切会话各自恢复。插件不再写 `localStorage` 开合偏好，只按会话记住自己内部四个页签选到哪一个。
+- **blank（新建会话 hero）期间**：宿主会隐藏整个会话 header，右上角开关随之隐藏——与内置页签行为一致；此时可从右栏自身的引导页打开本页签。
 - **费用匹配**：费用是估算值，取决于定价表配置；金额保留 6 位小数传输、按大小自适应显示精度。
 - **改动追踪**：只覆盖写文件类工具调用；bash/pwsh 内部的文件改动无法可靠捕获。
 - **概览请求数/费用/运行时间**：由服务端从会话事件日志折叠（`request/header`、`assistant/message` 的 usage），插件安装前的历史会话在首次访问时会一次性补算；运行时间 = 自首次请求至今（含空闲）。

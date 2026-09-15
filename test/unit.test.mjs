@@ -186,19 +186,27 @@ console.log('✓ module contract + route registration');
   const sessionId = 's-test-1';
   // UTC 02:00 == Beijing 10:00 → on-peak (off-peak is 00:30–08:30 Beijing).
   const base = Date.UTC(2026, 7, 19, 2, 0, 0);
+  // The durable log is modelled as a REAL array so the fold's incremental
+  // contract is actually exercised: `snapshotEvents(fromSeq)` must slice, exactly
+  // as the core's `log.slice(fromSeq, seq)` does. A fixture that ignored the
+  // argument (returning the whole log every time) would re-fold every event on
+  // each call and silently hide double counting.
+  const events = [
+    // The epoch header nests the route under `config` (EpochHeader.config).
+    { type: 'request/header', seq: 0, time: base, data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-chat' } } } },
+    { type: 'step/start', seq: 1, time: base + 1, data: { turn: 0, step: 0 } },
+    { type: 'assistant/message', seq: 2, time: base + 1000, data: { turn: 0, step: 0, usage: { inputTokens: 100, cacheReadTokens: 900, cacheWriteTokens: 0, outputTokens: 50 } } },
+    { type: 'request/header', seq: 3, time: base + 2000, data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-chat' } } } },
+    { type: 'step/start', seq: 4, time: base + 2001, data: { turn: 1, step: 0 } },
+    { type: 'assistant/message', seq: 5, time: base + 3000, data: { turn: 1, step: 0, usage: { inputTokens: 200, cacheReadTokens: 800, cacheWriteTokens: 0, outputTokens: 30 } } },
+    { type: 'tool/call', seq: 6, time: base + 4000, data: { name: 'write', arguments: { filePath: 'D:/x/a.ts' } } },
+  ];
   const session = {
     id: sessionId,
-    // dsh 0.1.3-alpha.1+: the Session exposes snapshots, not a public `.events`.
-    snapshotEvents: () => [
-      // The epoch header nests the route under `config` (EpochHeader.config).
-      { type: 'request/header', seq: 0, time: base, data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-chat' } } } },
-      { type: 'step/start', seq: 1, time: base + 1, data: { turn: 0, step: 0 } },
-      { type: 'assistant/message', seq: 2, time: base + 1000, data: { turn: 0, step: 0, usage: { inputTokens: 100, cacheReadTokens: 900, cacheWriteTokens: 0, outputTokens: 50 } } },
-      { type: 'request/header', seq: 3, time: base + 2000, data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-chat' } } } },
-      { type: 'step/start', seq: 4, time: base + 2001, data: { turn: 1, step: 0 } },
-      { type: 'assistant/message', seq: 5, time: base + 3000, data: { turn: 1, step: 0, usage: { inputTokens: 200, cacheReadTokens: 800, cacheWriteTokens: 0, outputTokens: 30 } } },
-      { type: 'tool/call', seq: 6, time: base + 4000, data: { name: 'write', arguments: { filePath: 'D:/x/a.ts' } } },
-    ],
+    // dsh 0.1.3-alpha.1+: the Session exposes a sliced snapshot, not a public
+    // `.events`. Honouring `fromSeq` is what keeps the fold incremental — the
+    // plugin asks only for the suffix it has not folded yet.
+    snapshotEvents: (fromSeq = 0) => events.slice(fromSeq),
   };
   ctx._sessions.set(sessionId, session);
   ctx._listeners['session/event'](session);
@@ -237,6 +245,36 @@ console.log('✓ module contract + route registration');
   assert.equal(cdata.changes[0].path, 'D:/x/a.ts');
   assert.equal(cdata.changes[0].tool, 'write');
   console.log('✓ changes tracking (tool/call → write path)');
+
+  // Regression: the fold must consume only the UNFOLDED SUFFIX. Asking for a
+  // bare `snapshotEvents()` re-reads and re-folds the whole log on every call —
+  // that double-counted usage and made the per-`session/event` fold O(n²). The
+  // real core slices (`log.slice(fromSeq, seq)`), so the fixture does too, and
+  // this block asserts the requested offset is exactly the folded cursor.
+  {
+    const asked = [];
+    const original = session.snapshotEvents;
+    session.snapshotEvents = (fromSeq = 0) => {
+      asked.push(fromSeq);
+      return original(fromSeq);
+    };
+
+    events.push(
+      { type: 'request/header', seq: 7, time: base + 5000, data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-chat' } } } },
+      { type: 'assistant/message', seq: 8, time: base + 6000, data: { turn: 2, step: 0, usage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 5 } } },
+    );
+    ctx._listeners['session/event'](session);
+
+    assert.deepEqual(asked, [7], `fold must read only the unfolded suffix, asked=${JSON.stringify(asked)}`);
+
+    const res3 = makeRes();
+    await handler(makeReq('GET', '/dsh-sidebar-panel/api/overview?sessionId=' + sessionId, OK_HEADERS), res3);
+    const d3 = parse(res3);
+    // Three requests in the log — not three plus two re-folded copies.
+    assert.equal(d3.overview.requestCount, 3, 'no re-folded requests');
+    assert.equal(d3.overview.byModel[0].input, 100 + 900 + 200 + 800 + 10, 'no duplicated usage');
+    console.log('✓ incremental fold: only the unfolded suffix is read (no O(n²), no double count)');
+  }
 }
 
 // 7. unknown session
