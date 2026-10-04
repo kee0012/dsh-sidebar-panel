@@ -9,25 +9,30 @@ DSH（DeepSeek Harness，Web profile）**右侧栏的一个页签插件**：通�
 - **改动**：本次会话中写文件类工具（write/edit/str-replace-editor 等）触碰过的文件列表。
 - **工具**：本窗口内的工具调用列表与参数/结果详情（自建渲染）。
 
-> **兼容性**：需 DSH **0.1.5+** 的 **Web profile**。插件依赖所加载环境提供两样东西：宿主的 `ctx.webServer`（同源 HTTP 路由）与客户端的右栏页签注册表（`ctx.sidebarRightTabs`，0.1.5 起随右栏一起提供）。启动的是同一套 Web profile 的桌面外壳同样可用（路由与浏览器中一致）；没有 web server 的外壳不可用。
+> **兼容性**：需 DSH **0.2.0+** 的 **Web profile**（已在桌面版 **0.2.0-rc.2** 上实测）。插件依赖所加载环境提供两样东西：宿主的 `ctx.webServer`（同源 HTTP 路由）与客户端右栏的页签注册表（`ctx.sidebarRightTabs`，0.1.5 起随右栏一起提供）。`package.json → dsh.client.inject` 声明的 6 个客户端包在 0.2.0-rc.2 中均已提供；服务端依赖已对齐宿主提供的版本（`@deepseek-ai/schemastery ^3.18.4`、`@deepseek-ai/dsh-credentials ^0.2.0-rc.2`）。启动的是同一套 Web profile 的桌面外壳同样可用（路由与浏览器中一致）；没有 web server 的外壳不可用。
 
 ## 目录结构
 
 ```
 dsh-sidebar-panel/
-├── package.json             # DSH bundle 清单 + client 注入声明 + 测试脚本
+├── package.json             # DSH bundle 清单 + client 注入声明 + 构建 / 门禁 / 测试脚本
 ├── cordis.patch.yml         # 把插件插入 DSH 组合层
-├── src/index.js             # 服务端：同源 HTTP API + 会话事件增量折叠（用量/费用/改动）+ 文件浏览 + reveal
-├── client/client.js         # 客户端：注册右栏页签（类型 + 正文）+ 头部开关 + 四页签 + 右键菜单
+├── src/index.js             # 服务端源码：同源 HTTP API + 会话事件增量折叠（用量/费用/改动）+ 文件浏览 + reveal
+├── client/client.js         # 客户端源码：注册右栏页签（类型 + 正文）+ 头部开关 + 四页签 + 右键菜单
+├── lib/                     # 构建产物：lib/index.js + lib/client.js（由 src/ 与 client/ 生成，勿手改）
+├── scripts/build.mjs        # 构建：确定性拷贝 + 生成横幅（零构建工具链依赖）
+├── scripts/gates/run.mjs    # 门禁：产物新鲜度 / 入口点 / 名称一致性 / React external / 依赖对齐
 ├── test/unit.test.mjs       # 服务端单元测试（mock ctx，无需 DSH 实例，不依赖具体路径）
 ├── test/smoke.client.mjs    # 客户端冒烟：桩运行时断言注册形状 / 导航行为 / chat 切片
+├── tsconfig.json            # 仅编辑器 / 类型提示用（noEmit，构建流程不调用 tsc）
+├── docs/plan.md             # 插件计划与决策记录
 ├── SECURITY.md              # 凭据与网络面说明（含扫描误报的逐条说明）
 └── README.md / README_EN.md
 ```
 
 > **右栏契约**：0.1.5 起右栏由官方包 `@deepseek-ai/dsh-client-ui-sidebar-right` 占据，并对外提供页签注册接口。第三方类型的正式接入方式是两段式注册——`ctx.sidebarRightTabs.register({ id, kind, priority: 'extension', title, guide })` 定义类型，再把正文注册进按键位 `sidebar.right.pane.tab`（`key` 与 `id` 相同）。本插件走的就是这条路径（内置的 `files` / `documentpreview` / `guide` 也是），因此**不需要也不应该**去抢占 `rightbar` 插槽。
 
-> **依赖**：服务端依赖 `@deepseek-ai/schemastery`（配置 schema）与 `@deepseek-ai/dsh-credentials`（读取 `DEEPSEEK_API_KEY` 凭据），二者由 DSH 运行时提供。`pnpm pack` 产物不含 `node_modules`；以源码方式开发时，在插件目录执行 `pnpm install` 即可解析依赖。
+> **依赖**：服务端依赖 `@deepseek-ai/schemastery`（配置 schema）与 `@deepseek-ai/dsh-credentials`（读取 `DEEPSEEK_API_KEY` 凭据），版本已对齐 DSH 0.2.x 宿主提供的那两份（`^3.18.4` / `^0.2.0-rc.2`）。两者都按全局符号 / 鸭子类型识别，跨副本的版本差异不影响行为（依据见 `docs/plan.md`）。`pnpm pack` 产物不含 `node_modules`。**以 `link:` 方式装到 profile 之外的目录时**，Node 从插件实体目录向上解析不到 profile 的 `node_modules`，该目录必须自己执行 `pnpm install`；装在 profile 内（git / npm 源）时由 profile 提供。
 
 ## 安装
 
@@ -90,10 +95,16 @@ dsh plugin --profile web add dsh-sidebar-panel
 
 ```sh
 pnpm install          # 解析 @deepseek-ai/schemastery 与 @deepseek-ai/dsh-credentials
-npm run check         # 语法检查（client 与 server）
-npm test              # 单元测试 + 客户端冒烟
-npm run test:unit     # node test/unit.test.mjs
-npm run test:smoke    # node test/smoke.client.mjs
+pnpm run bundle       # 生成 lib/index.js + lib/client.js（入库产物；改源码后必跑）
+pnpm run gates        # 结构门禁：产物新鲜度 / 入口点 / 名称一致性 / React external / 依赖对齐
+pnpm run check        # 语法检查（client 与 server）
+pnpm test             # 单元测试 + 客户端冒烟
+pnpm run verify       # bundle + gates + 两项测试（一条命令跑全链路）
+pnpm run test:unit    # node test/unit.test.mjs
+pnpm run test:smoke   # node test/smoke.client.mjs
+
+# 轻量结构校验（无需 node，由 dsh-plugin-studio skill 提供）
+python <dsh-plugin-studio>/scripts/verify_plugin.py .
 
 # 真实实例的 API 冒烟（端口按你的实例改；GET 同源不带 Origin，POST 冒烟请带 Origin）
 curl "http://127.0.0.1:3080/dsh-sidebar-panel/api/config"
@@ -101,6 +112,9 @@ curl -H "Origin: http://127.0.0.1:3080" -H "Content-Type: application/json" -X P
   -d '{"root":"<你的工作区>","path":"dsh-sidebar-panel/package.json"}' \
   "http://127.0.0.1:3080/dsh-sidebar-panel/api/file-content"
 ```
+
+> 源码改动一律改 `src/` 与 `client/`，然后跑 `pnpm run bundle`；`lib/` 是产物，`pnpm run gates` 会逐字节校验它与源码一致，手改 `lib/` 直接失败。
+> `python verify_plugin.py` 对本插件会报一条 `禁止声明 @deepseek-ai/* 依赖` 的 FAIL —— 这是**有意的规范偏离**，理由见 `docs/plan.md`：`link:` 到 profile 之外的部署需要插件自带依赖，而宿主官方包在 `app.asar` 内、插件用 Node 原生解析够不到，改 `peerDependencies` 只会把"版本漂移"变成 `MODULE_NOT_FOUND`。
 
 ## 已知限制
 
@@ -112,7 +126,7 @@ curl -H "Origin: http://127.0.0.1:3080" -H "Content-Type: application/json" -X P
 - **改动追踪**：只覆盖写文件类工具调用；bash/pwsh 内部的文件改动无法可靠捕获。
 - **概览请求数/费用/运行时间**：由服务端从会话事件日志折叠（`request/header`、`assistant/message` 的 usage），插件安装前的历史会话在首次访问时会一次性补算；运行时间 = 自首次请求至今（含空闲）。
 - **账户数据口径**：**余额**来自 DeepSeek 官方接口（需在 DSH 凭据/环境变量中配置 `DEEPSEEK_API_KEY`，否则显示"未配置"提示）。官方仅提供余额查询接口，无公开的累计消费/请求次数接口，故账户卡片不再展示这两项；官方精确账单可通过"充值"按钮进入 https://platform.deepseek.com/usage 查看。
-- **跨域防护**：GET 请求不做 Origin 校验（同源 GET 本就不带 Origin 头）；POST 依赖"不响应 CORS 预检 + 仅接受 JSON"防线（与 DSH 宿主 API 同策略）。
+- **跨域防护**：每个请求都要求 `Host` 是环回名（`127.0.0.1` / `localhost` / `::1`），并对 `Sec-Fetch-Site: cross-site` 直接拒绝；带 `Origin` 时必须也是环回。早先的「`Origin` 与 `Host` 相等」判断可被 **DNS rebinding** 绕过（恶意页面下二者同为攻击者域名），已修复。同源 GET 不带 `Origin` 头，因此仍照常放行；POST 另有「不响应 CORS 预检 + 仅接受 JSON」防线（与 DSH 宿主 API 同策略）。
 
 ## 反馈与贡献
 

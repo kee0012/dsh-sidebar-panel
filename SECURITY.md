@@ -34,7 +34,7 @@ candidates are:
 
 | Location | What it actually is |
 | --- | --- |
-| `package.json` → `dependencies` | version ranges (`"@deepseek-ai/dsh-credentials": "0.1.5-rc.1"`), not a secret |
+| `package.json` → `dependencies` | version ranges (`"@deepseek-ai/dsh-credentials": "^0.2.0-rc.2"`), not a secret |
 | `src/index.js`, `/balance` handler | `resolvedKey = resolved.value` — an assignment of a runtime value into a local variable |
 | `src/index.js`, `/balance` handler | `` `Bearer ${resolvedKey}` `` — string interpolation of that variable |
 | `test/unit.test.mjs` | a stub credentials service returning a literal such as `test-key`, used only inside the test process |
@@ -57,14 +57,28 @@ All HTTP routes are served under the same-origin prefix
 
 Fences:
 
-- Same-origin check on every request; the server never answers a CORS
-  preflight, so a hostile page cannot drive the side-effecting `POST` routes.
+- **Loopback-only `Host` gate on every request.** `sameOrigin()` accepts a
+  request only when the `Host` header is a loopback name (`127.0.0.1`,
+  `localhost`, `::1`), the request is not labelled `Sec-Fetch-Site: cross-site`,
+  and — when an `Origin` is present — that origin is loopback too. The previous
+  `Origin === Host` comparison was bypassable by **DNS rebinding**, where a
+  hostile page's origin and the request's `Host` are the same attacker hostname.
+- The server never answers a CORS preflight, so a hostile page cannot drive the
+  side-effecting `POST` routes.
 - Every filesystem path is resolved inside the session workspace root
   (`resolveInside`); a path that escapes it is rejected with
   `OUTSIDE_WORKSPACE`.
-- `/file-raw` serves a strict content-type whitelist (`pdf`, `png`, `jpeg`,
-  `gif`, `webp`) and falls back to `application/octet-stream` for everything
-  else, so a hostile file can never be embedded with an executable mime type.
+- `/file-content` reads a bounded UTF-8 prefix (`maxContentChars * 3` bytes,
+  never the whole file) and never ends on a lone high surrogate, so a huge file
+  cannot balloon memory or leak a replacement character.
+- `/file-raw` refuses anything above `MAX_RAW_BYTES` (64 MiB) with
+  `FILE_TOO_LARGE` and streams what is left instead of buffering it, with a
+  strict content-type whitelist (`pdf`, `png`, `jpeg`, `gif`, `webp`) and
+  `application/octet-stream` for everything else — a hostile file can never be
+  embedded with an executable mime type.
+- `/reveal` rejects UNC paths (`\\host\share`, `//host/share`) and relative
+  paths with `INVALID_PATH`. A UNC path would make Windows open an SMB session
+  to an attacker-controlled host and leak the current user's NTLM hash.
 - `/reveal` spawns the platform file manager detached with `stdio: 'ignore'`;
   the path is passed as an argument, never through a shell.
 

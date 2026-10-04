@@ -1,0 +1,18 @@
+{
+  "//": "Editor / type-checker aid only. Both halves ship as plain JavaScript, so the build never runs tsc (see scripts/build.mjs). `checkJs` stays off because the browser half is CommonJS-shaped ModuleLoader source that the host wraps, not a standalone ESM module.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.js", "client/**/*.js", "scripts/**/*.mjs", "test/**/*.mjs"],
+  "exclude": ["node_modules", "lib"]
+}

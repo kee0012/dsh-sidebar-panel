@@ -1,6 +1,6 @@
 {
   "name": "dsh-sidebar-panel",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "DSH (DeepSeek Harness) right-side panel plugin: a tab of the shipped right column with overview (context/cost/usage), files (workspace tree + right-click reference/copy/reveal), changes (files written this session) and tools (tool-call details).",
   "type": "module",
   "license": "MIT",
@@ -22,14 +22,14 @@
   "bugs": {
     "url": "https://github.com/kee0012/dsh-sidebar-panel/issues"
   },
-  "main": "./src/index.js",
+  "main": "lib/index.js",
   "dependencies": {
-    "@deepseek-ai/schemastery": "3.18.2",
-    "@deepseek-ai/dsh-credentials": "0.1.5-rc.1"
+    "@deepseek-ai/schemastery": "^3.18.4",
+    "@deepseek-ai/dsh-credentials": "^0.2.0-rc.2"
   },
   "exports": {
-    ".": "./src/index.js",
-    "./client": "./client/client.js",
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
@@ -50,8 +50,9 @@
     }
   },
   "files": [
-    "client",
+    "lib",
     "src",
+    "client",
     "cordis.patch.yml",
     "README.md",
     "README_EN.md",
@@ -59,9 +60,12 @@
     "LICENSE"
   ],
   "scripts": {
+    "bundle": "node scripts/build.mjs",
+    "gates": "node scripts/gates/run.mjs",
     "check": "node --check src/index.js && node --check client/client.js",
     "test": "node test/unit.test.mjs && node test/smoke.client.mjs",
     "test:unit": "node test/unit.test.mjs",
-    "test:smoke": "node test/smoke.client.mjs"
+    "test:smoke": "node test/smoke.client.mjs",
+    "verify": "node scripts/build.mjs && node scripts/gates/run.mjs && node test/unit.test.mjs && node test/smoke.client.mjs"
   }
 }

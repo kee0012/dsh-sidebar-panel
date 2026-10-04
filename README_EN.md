@@ -7,25 +7,30 @@ A **right-column tab plugin** for DSH (DeepSeek Harness, Web profile). It regist
 - **Changes**: files touched by write-like tools (write/edit/str-replace-editor, …) in the current session.
 - **Tools**: the tool calls in the current window with argument/result details (self-built view).
 
-> **Compatibility**: 0.1.5 or newer, **Web profile**. The plugin needs two things from the tree it is loaded into: the host's `ctx.webServer` (same-origin HTTP routes) and the client-side right-column tab registry (`ctx.sidebarRightTabs`, shipped in 0.1.5). A desktop shell that boots this same web profile works — the routes are served exactly as in a browser; a shell without the web server does not.
+> **Compatibility**: DSH **0.2.0+**, **Web profile** (verified on desktop **0.2.0-rc.2**). The plugin needs two things from the tree it is loaded into: the host's `ctx.webServer` (same-origin HTTP routes) and the client-side right-column tab registry (`ctx.sidebarRightTabs`, shipped with the column since 0.1.5). All 6 client packages declared by `package.json → dsh.client.inject` are provided in 0.2.0-rc.2, and the server dependencies are aligned with the versions the host provides (`@deepseek-ai/schemastery ^3.18.4`, `@deepseek-ai/dsh-credentials ^0.2.0-rc.2`). A desktop shell that boots this same web profile works — the routes are served exactly as in a browser; a shell without the web server does not.
 
 ## Layout
 
 ```
 dsh-sidebar-panel/
-├── package.json             # DSH bundle manifest + client injection declaration + test scripts
+├── package.json             # DSH bundle manifest + client injection declaration + build / gate / test scripts
 ├── cordis.patch.yml         # inserts the plugin into the DSH composition layer
-├── src/index.js             # server: same-origin HTTP API + incremental session-event folding (usage/cost/changes) + file browsing + reveal
-├── client/client.js         # browser: right-column tab (type + body) + header toggle + four tabs + context menu
+├── src/index.js             # server source: same-origin HTTP API + incremental session-event folding (usage/cost/changes) + file browsing + reveal
+├── client/client.js         # client source: right-column tab (type + body) + header toggle + four tabs + context menu
+├── lib/                     # build output: lib/index.js + lib/client.js (generated from src/ and client/ — do not hand-edit)
+├── scripts/build.mjs        # build: deterministic copy + banner generation (zero build-toolchain dependencies)
+├── scripts/gates/run.mjs    # gates: artifact freshness / entry points / name consistency / React external / dependency alignment
 ├── test/unit.test.mjs       # server unit tests (mocked ctx, no DSH instance, no machine-specific paths)
 ├── test/smoke.client.mjs    # client smoke: stub runtime asserting registration shape / navigation / chat slice
+├── tsconfig.json            # editor / type hints only (noEmit; the build never calls tsc)
+├── docs/plan.md             # plugin plan and decision log
 ├── SECURITY.md              # credential and network-surface notes (incl. the scanner false positives)
 └── README.md / README_EN.md
 ```
 
 > **Right-column contract**: since 0.1.5 the column is owned by the shipped `@deepseek-ai/dsh-client-ui-sidebar-right`, which exposes a tab registry. A type from outside the product registers in **two stages** — `ctx.sidebarRightTabs.register({ id, kind, priority: 'extension', title, guide })` defines the type, then its body goes into the keyed `sidebar.right.pane.tab` seat under the same `id`. This plugin takes exactly that path (as do the shipped `files`, `documentpreview` and `guide` types), so it neither needs nor wants to shadow the `rightbar` slot.
 
-> **Dependencies**: the server depends on `@deepseek-ai/schemastery` (config schema) and `@deepseek-ai/dsh-credentials` (resolves the `DEEPSEEK_API_KEY` credential); both are provided by the DSH runtime. `pnpm pack` output does not include `node_modules`; when developing from source, run `pnpm install` in the plugin directory to resolve dependencies.
+> **Dependencies**: the server depends on `@deepseek-ai/schemastery` (config schema) and `@deepseek-ai/dsh-credentials` (resolves the `DEEPSEEK_API_KEY` credential), with versions aligned to the pair the DSH 0.2.x host provides (`^3.18.4` / `^0.2.0-rc.2`). Both are identified by global symbol / duck typing, so version skew across copies does not change behaviour (see `docs/plan.md`). `pnpm pack` output does not include `node_modules`. **When installed outside the profile via `link:`**, Node cannot resolve the profile's `node_modules` walking up from the plugin's real directory, so that directory has to run `pnpm install` itself; installed inside the profile (git / npm sources), the profile provides them.
 
 ## Install
 
@@ -89,10 +94,16 @@ Add a `config` block to the plugin entry in the DSH composition config (all defa
 
 ```sh
 pnpm install          # resolves @deepseek-ai/schemastery and @deepseek-ai/dsh-credentials
-npm run check         # syntax checks (client + server)
-npm test              # unit tests + client smoke
-npm run test:unit     # node test/unit.test.mjs
-npm run test:smoke    # node test/smoke.client.mjs
+pnpm run bundle       # generates lib/index.js + lib/client.js (committed artifacts; always rerun after source changes)
+pnpm run gates        # structural gates: artifact freshness / entry points / name consistency / React external / dependency alignment
+pnpm run check        # syntax checks (client + server)
+pnpm test             # unit tests + client smoke
+pnpm run verify       # bundle + gates + both test suites (the whole chain in one command)
+pnpm run test:unit    # node test/unit.test.mjs
+pnpm run test:smoke   # node test/smoke.client.mjs
+
+# lightweight structural check (no node required, provided by the dsh-plugin-studio skill)
+python <dsh-plugin-studio>/scripts/verify_plugin.py .
 
 # API smoke tests against a live instance (adjust the port; GET sends no Origin
 # header — same-origin browser GETs don't; POST smoke tests must carry Origin)
@@ -101,6 +112,9 @@ curl -H "Origin: http://127.0.0.1:3080" -H "Content-Type: application/json" -X P
   -d '{"root":"<your-workspace>","path":"dsh-sidebar-panel/package.json"}' \
   "http://127.0.0.1:3080/dsh-sidebar-panel/api/file-content"
 ```
+
+> Source changes always go into `src/` and `client/`, and then `pnpm run bundle`. `lib/` is build output; `pnpm run gates` byte-compares it against the sources, so hand-editing `lib/` fails outright.
+> `python verify_plugin.py` reports one `禁止声明 @deepseek-ai/* 依赖` FAIL for this plugin — that is a **deliberate deviation from the convention**, for the reasons in `docs/plan.md`: a `link:` deployment outside the profile needs the plugin to carry its own dependencies, the host's shipped packages live inside `app.asar` and are out of reach of Node's native resolution from the plugin, and switching to `peerDependencies` would only turn "version drift" into `MODULE_NOT_FOUND`.
 
 ## Known limitations
 
@@ -112,7 +126,7 @@ curl -H "Origin: http://127.0.0.1:3080" -H "Content-Type: application/json" -X P
 - **Change tracking**: covers write-file-like tool calls only; file changes made inside bash/pwsh cannot be captured reliably.
 - **Overview counts**: request count/cost/runtime are folded server-side from the session event log (`request/header`, `assistant/message` usage). Pre-plugin history sessions are back-filled on first access; runtime = time since the first request (includes idle time).
 - **Account data**: **balance** comes from the official DeepSeek endpoint (requires `DEEPSEEK_API_KEY` in DSH credentials/env, otherwise a "not configured" hint is shown). The official API exposes no public cumulative-spend/request-count endpoint, so the account card omits those; exact billing is available via the Top Up button at https://platform.deepseek.com/usage.
-- **Cross-origin fence**: GET requests are not Origin-checked (same-origin GETs carry no Origin header); POSTs rely on "never answer CORS preflights + JSON-only bodies" (same policy as the DSH host API).
+- **Cross-origin fence**: every request requires `Host` to be a loopback name (`127.0.0.1` / `localhost` / `::1`) and rejects `Sec-Fetch-Site: cross-site` outright; a present `Origin` must be loopback too. The earlier "`Origin` equals `Host`" check could be bypassed by **DNS rebinding** (under a malicious page both are the attacker's domain) and has been fixed. Same-origin GETs carry no `Origin` header and are still let through; POSTs additionally rely on "never answer CORS preflights + JSON-only bodies" (same policy as the DSH host API).
 
 ## Feedback & contributing
 

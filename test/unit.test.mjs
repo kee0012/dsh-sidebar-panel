@@ -5,6 +5,9 @@
  */
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs/promises';
+import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { apply, Config, name, inject } from '../src/index.js';
 
@@ -51,19 +54,43 @@ function makeCtx() {
   return ctx;
 }
 
+// The mock response is a REAL Writable: /file-raw now streams the file into
+// the response (`createReadStream(...).pipe(response)`), which needs a proper
+// stream destination, not an object with an `end()` method.
+class MockRes extends Writable {
+  constructor() {
+    super();
+    this.status = 0;
+    this.headers = {};
+    this.chunks = [];
+  }
+
+  writeHead(status, headers) {
+    this.status = status;
+    this.headers = headers;
+  }
+
+  _write(chunk, encoding, callback) {
+    this.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+    callback();
+  }
+
+  get body() {
+    return Buffer.concat(this.chunks).toString('utf8');
+  }
+}
+
 function makeRes() {
-  return {
-    status: 0,
-    headers: {},
-    body: '',
-    writeHead(status, headers) {
-      this.status = status;
-      this.headers = headers;
-    },
-    end(payload) {
-      this.body = payload;
-    },
-  };
+  return new MockRes();
+}
+
+/** Resolves once the response is fully written (streaming routes). */
+function finished(res) {
+  if (res.writableFinished) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    res.on('finish', resolve);
+    res.on('error', reject);
+  });
 }
 
 function makeReq(method, url, headers = {}, body = null) {
@@ -301,23 +328,29 @@ console.log('✓ module contract + route registration');
   console.log('✓ reveal empty path → 400');
 }
 
-// 10. file-raw preview route (content-type whitelist + confinement)
+// 10. file-raw preview route (content-type whitelist + confinement + streaming)
 {
   const res = makeRes();
+  const done = finished(res);
   const url = '/dsh-sidebar-panel/api/file-raw?root=' + encodeURIComponent(PROJECT_ROOT)
     + '&path=' + encodeURIComponent('package.json');
   await handler(makeReq('GET', url, OK_HEADERS), res);
+  await done;
   assert.equal(res.status, 200);
   // .json is not in the embed whitelist → octet-stream (never executable mime)
   assert.equal(res.headers['content-type'], 'application/octet-stream');
+  assert.equal(Number(res.headers['content-length']), (await fs.stat(path.join(PROJECT_ROOT, 'package.json'))).size);
   assert.ok(res.body.length > 0, 'raw bytes returned');
-  console.log('✓ file-raw non-whitelist ext → octet-stream');
+  assert.ok(res.body.includes('dsh-sidebar-panel'), 'streamed body is the real file content');
+  console.log('✓ file-raw non-whitelist ext → octet-stream (streamed)');
 }
 {
   const res = makeRes();
+  const done = finished(res);
   const url = '/dsh-sidebar-panel/api/file-raw?root=' + encodeURIComponent(PROJECT_ROOT)
     + '&path=' + encodeURIComponent('../../Windows/win.ini');
   await handler(makeReq('GET', url, OK_HEADERS), res);
+  await done;
   assert.equal(res.status, 400);
   assert.equal(parse(res).error.code, 'OUTSIDE_WORKSPACE');
   console.log('✓ file-raw escape rejected');
@@ -373,6 +406,189 @@ console.log('✓ module contract + route registration');
   assert.equal(data.balance, null);
   assert.equal(data.error.code, 'NO_API_KEY');
   console.log('✓ balance route (no credentials → NO_API_KEY)');
+}
+
+// 12. DNS-rebinding fence: Host is the primary gate, not Origin/Host equality
+{
+  // A rebinding attack page IS the origin host: Origin and Host are both the
+  // attacker name, so the old equality check accepted it.
+  const res = makeRes();
+  await handler(makeReq('GET', '/dsh-sidebar-panel/api/config', {
+    host: 'evil.example:19387',
+    origin: 'http://evil.example:19387',
+  }), res);
+  assert.equal(res.status, 403);
+  assert.equal(parse(res).error.code, 'FORBIDDEN');
+  console.log('✓ DNS rebinding (attacker Host == attacker Origin) rejected (403)');
+}
+{
+  const res = makeRes();
+  await handler(makeReq('GET', '/dsh-sidebar-panel/api/config', { host: 'evil.example:19387' }), res);
+  assert.equal(res.status, 403);
+  console.log('✓ non-loopback Host rejected (403)');
+}
+{
+  const res = makeRes();
+  await handler(makeReq('GET', '/dsh-sidebar-panel/api/config', {
+    host: '127.0.0.1:19387',
+    'sec-fetch-site': 'cross-site',
+  }), res);
+  assert.equal(res.status, 403);
+  console.log('✓ Sec-Fetch-Site: cross-site rejected (403)');
+}
+{
+  // No regression: a loopback Host with a loopback (or absent) Origin passes.
+  const res = makeRes();
+  await handler(makeReq('GET', '/dsh-sidebar-panel/api/config', {
+    host: 'localhost:19387',
+    origin: 'http://localhost:19387',
+  }), res);
+  assert.equal(res.status, 200);
+  console.log('✓ loopback Host + loopback Origin accepted');
+}
+
+// 13. reveal path validation (UNC → SMB/NTLM leak, and relative paths)
+{
+  const res = makeRes();
+  await handler(makeReq('POST', '/dsh-sidebar-panel/api/reveal', OK_HEADERS, {
+    path: '\\\\evil.example\\share\\x',
+  }), res);
+  assert.equal(res.status, 400);
+  assert.equal(parse(res).error.code, 'INVALID_PATH');
+  console.log('✓ reveal UNC path → 400 INVALID_PATH');
+}
+{
+  const res = makeRes();
+  await handler(makeReq('POST', '/dsh-sidebar-panel/api/reveal', OK_HEADERS, {
+    path: 'relative/x.txt',
+  }), res);
+  assert.equal(res.status, 400);
+  assert.equal(parse(res).error.code, 'INVALID_PATH');
+  console.log('✓ reveal relative path → 400 INVALID_PATH');
+}
+
+// 14. bounded file reads: /file-content byte cap + /file-raw size ceiling
+{
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsp-unit-'));
+  try {
+    const cap = config.fileBrowser.maxContentChars; // 40000 by default
+    const suffix = config.fileBrowser.contentTruncationSuffix;
+
+    const ascii = path.join(dir, 'ascii.txt');
+    await fs.writeFile(ascii, 'a'.repeat(cap + 5000));
+    const res = makeRes();
+    await handler(makeReq('POST', '/dsh-sidebar-panel/api/file-content', OK_HEADERS, {
+      root: dir,
+      path: 'ascii.txt',
+    }), res);
+    assert.equal(res.status, 200);
+    const data = parse(res);
+    assert.equal(data.truncated, true);
+    assert.ok(data.text.endsWith(suffix), 'truncation suffix appended');
+    assert.equal(data.text.length, cap + suffix.length);
+    // `chars` still describes the FILE, not the shortened preview.
+    assert.equal(data.chars, cap + 5000);
+    console.log('✓ file-content truncates at maxContentChars (byte-capped read)');
+
+    // Wide characters are 3 bytes each: the byte cap must still yield `cap`
+    // intact characters, never a half-decoded one.
+    const wide = path.join(dir, 'wide.txt');
+    await fs.writeFile(wide, '中'.repeat(cap + 1000));
+    const res2 = makeRes();
+    await handler(makeReq('POST', '/dsh-sidebar-panel/api/file-content', OK_HEADERS, {
+      root: dir,
+      path: 'wide.txt',
+    }), res2);
+    const d2 = parse(res2);
+    assert.equal(d2.truncated, true);
+    assert.equal(d2.text.slice(0, -suffix.length).length, cap, 'cap characters delivered');
+    assert.ok(!d2.text.includes('\uFFFD'), 'no replacement char from a split UTF-8 sequence');
+    assert.equal(d2.chars, (cap + 1000) * 3);
+    console.log('✓ file-content UTF-8 prefix intact (no split code point)');
+
+    const huge = path.join(dir, 'huge.bin');
+    await fs.writeFile(huge, 'x');
+    await fs.truncate(huge, 64 * 1024 * 1024 + 1); // sparse: costs no disk I/O
+    const res3 = makeRes();
+    const done3 = finished(res3);
+    const url = '/dsh-sidebar-panel/api/file-raw?root=' + encodeURIComponent(dir)
+      + '&path=' + encodeURIComponent('huge.bin');
+    await handler(makeReq('GET', url, OK_HEADERS), res3);
+    await done3;
+    assert.equal(res3.status, 413);
+    assert.equal(parse(res3).error.code, 'FILE_TOO_LARGE');
+    assert.equal(res3.body.length < 4096, true, 'oversized file is not streamed');
+    console.log('✓ file-raw over 64 MiB → 413 FILE_TOO_LARGE (nothing streamed)');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+// 15. the request window is trimmed past MAX_REQUESTS without losing stats
+{
+  const sessionId = 's-test-trim';
+  const base = Date.UTC(2026, 7, 19, 2, 0, 0); // Beijing 10:00 → on-peak
+  const COUNT = 2100; // > the plugin's 2000-record window
+  const events = [];
+  for (let i = 0; i < COUNT; i += 1) {
+    events.push({
+      type: 'request/header',
+      seq: events.length,
+      time: base + i * 2,
+      data: { header: { config: { provider: 'p', model: 'm' } } },
+    });
+    events.push({
+      type: 'assistant/message',
+      seq: events.length,
+      time: base + i * 2 + 1,
+      data: { usage: { inputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 1 } },
+    });
+  }
+  const session = { id: sessionId, snapshotEvents: (fromSeq = 0) => events.slice(fromSeq) };
+  ctx._sessions.set(sessionId, session);
+
+  const res = makeRes();
+  await handler(makeReq('GET', '/dsh-sidebar-panel/api/overview?sessionId=' + sessionId, OK_HEADERS), res);
+  const data = parse(res);
+  assert.equal(data.overview.requestCount, COUNT, 'every request counted despite the trimmed window');
+  assert.equal(data.overview.byModel.length, 1);
+  assert.equal(data.overview.byModel[0].count, COUNT);
+  assert.equal(data.overview.byModel[0].miss, COUNT);
+  assert.equal(data.overview.byModel[0].output, COUNT);
+  assert.equal(data.overview.firstTime, base, 'first request time survives trimming');
+  // 2100 × (1 × 2 + 1 × 8) / 1e6 = 0.021
+  assert.ok(Math.abs(data.overview.cost - 0.021) < 1e-9, `cost=${data.overview.cost}`);
+  console.log('✓ request window trimmed past 2000 without losing overview stats');
+}
+
+// 16. sessions the panel never looked at are not folded at all
+{
+  const sessionId = 's-test-lazy';
+  const asked = [];
+  const base = Date.UTC(2026, 7, 19, 2, 0, 0);
+  const events = [
+    { type: 'request/header', seq: 0, time: base, data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-chat' } } } },
+    { type: 'tool/call', seq: 1, time: base + 1, data: { name: 'write', arguments: { filePath: 'D:/x/lazy.ts' } } },
+  ];
+  const session = {
+    id: sessionId,
+    snapshotEvents: (fromSeq = 0) => {
+      asked.push(fromSeq);
+      return events.slice(fromSeq);
+    },
+  };
+  ctx._sessions.set(sessionId, session);
+
+  ctx._listeners['session/event'](session);
+  assert.deepEqual(asked, [], 'an unfolded session costs nothing per event');
+
+  const res = makeRes();
+  await handler(makeReq('GET', '/dsh-sidebar-panel/api/changes?sessionId=' + sessionId, OK_HEADERS), res);
+  const data = parse(res);
+  assert.equal(data.changes.length, 1, 'first access still back-fills the whole history');
+  assert.equal(data.changes[0].path, 'D:/x/lazy.ts');
+  assert.deepEqual(asked, [0], 'the first fold reads from the very beginning');
+  console.log('✓ unvisited session skipped; first access back-fills full history');
 }
 
 console.log('\nALL UNIT TESTS PASSED');
