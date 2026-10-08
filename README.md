@@ -1,4 +1,5 @@
-<img width="3084" height="1670" alt="image" src="https://github.com/user-attachments/assets/a8c1651d-6477-4b8a-8614-be53e062cf69" />
+<img width="2540" height="1740" alt="image" src="https://github.com/user-attachments/assets/203f10a7-3ee6-476f-a8c9-0d93f619db9c" />
+
 
 # dsh-sidebar-panel
 
