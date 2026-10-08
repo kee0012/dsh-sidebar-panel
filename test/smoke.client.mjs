@@ -299,14 +299,14 @@ function makeCtx() {
   return { ctx, registrations, injections, tabTypes, navCalls, closeCalls, sidebarRight };
 }
 
-function load() {
+function load(primitives = { IconPanelLeftOutlineRegular: () => null }) {
   loaded.length = 0;
   vm.runInThisContext(BUNDLE_SOURCE, { filename: 'client/client.js' });
   const mod = loaded.pop();
   assert.ok(mod, 'bundle did not call __ModuleLoader__.load');
   return mod.factory(id => {
     if (id === 'react') return React;
-    if (id === '@deepseek-ai/dsh-client-ui-primitives') return { IconPanelLeftOutline16: () => null };
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitives;
     throw new Error('unexpected require: ' + id);
   });
 }
@@ -422,12 +422,66 @@ let closeCallsRef = [];
   const button = withHooks(header.component, { t: key => key, togglePanel: injected.togglePanel, ...panelProps() });
   assert.equal(button.type, 'button');
   assert.equal(button.props.className, 'dsp-toggle');
+  // The button itself renders a real element and never touches ctx.layout. The
+  // stub runtime keeps children as a positional array (`el.children`) and does
+  // not render them, so the glyph here is the child ELEMENT; B2 renders it to
+  // exercise the guard inside it.
+  assert.equal(button.children.length, 1, 'the toggle must carry exactly one child');
+  const glyph = button.children[0];
+  assert.equal(typeof glyph.type, 'function',
+    'the toggle glyph must be a real component, never an undefined export');
+  assert.equal(glyph.props.size, 16);
   navCalls.length = 0;
   sidebarRight._set(null, false);
   button.props.onClick();
   assert.deepEqual(navCalls, [['openTab', PACKAGE_ID]], 'the button click must go through the navigation face');
 
   console.log('✓ toggle navigates through sidebarRight (open / focus / collapse), no layout writes');
+}
+
+/* ---------------- B2. a host icon that is no longer shipped ---------------- */
+
+{
+  // The icon set moved from `<Name>16` to `<Name>Regular`/`<Name>Medium` with the
+  // 0.2 line, and the injected package is host-owned: reading a name it no longer
+  // exports yields `undefined`, and `React.createElement(undefined)` throws —
+  // which blanks the whole slot instead of just the button. The guard must fall
+  // back to artwork of our own, and it must still honour the old spelling.
+  const renameCases = [
+    [{ IconPanelLeftOutlineRegular: 'host-regular' }, 'host-regular', 'the current export name'],
+    [{ IconPanelLeftOutlineMedium: 'host-medium' }, 'host-medium', 'the medium variant'],
+    [{ IconPanelLeftOutline16: 'host-16' }, 'host-16', 'the pre-0.2 spelling, in case a host still ships only that'],
+  ];
+  for (const [primitives, expected, why] of renameCases) {
+    const exports = load(primitives);
+    const { ctx, registrations } = makeCtx();
+    exports.apply(ctx);
+    const header = registrations.find(r => r.options.name === 'conversation.session.header.utilities');
+    created = [];
+    const button = withHooks(header.component, { t: key => key, togglePanel: noop, ...panelProps() });
+    const glyph = withHooks(button.children[0].type, button.children[0].props);
+    assert.equal(glyph.type, expected, `the glyph must come from ${why}`);
+  }
+
+  const bare = load({});
+  const { ctx: bareCtx, registrations: bareRegistrations, tabTypes: bareTabTypes } = makeCtx();
+  bare.apply(bareCtx);
+  const bareHeader = bareRegistrations.find(r => r.options.name === 'conversation.session.header.utilities');
+  created = [];
+  const bareButton = withHooks(bareHeader.component, { t: key => key, togglePanel: noop, ...panelProps() });
+  const bareGlyph = withHooks(bareButton.children[0].type, bareButton.children[0].props);
+  assert.equal(bareGlyph.type, 'svg',
+    'a host that ships no matching icon must degrade to the bundled artwork, never to undefined');
+  assert.equal(bareGlyph.props.viewBox, '0 0 16 16');
+  assert.deepEqual(bareGlyph.children.map(child => child.type), ['rect', 'path']);
+  assert.equal(bareGlyph.props.stroke, 'currentColor', 'the fallback must inherit the host text colour');
+
+  // The guide capsule registered on the tab type points at the same glyph.
+  const guideIcon = bareTabTypes[0].guide[0].icon;
+  assert.equal(typeof guideIcon, 'function');
+  assert.equal(withHooks(guideIcon, { size: 16 }).type, 'svg');
+
+  console.log('✓ host icon guard: Regular / Medium / 16 spellings honoured, own glyph as fallback');
 }
 
 /* ---------------- C. panel body: chat data + close ---------------- */

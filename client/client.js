@@ -61,7 +61,43 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
   var module = { exports: {} };
   var exports = module.exports;
   var React = require("react");
-  var IconPanelLeftOutline16 = require("@deepseek-ai/dsh-client-ui-primitives").IconPanelLeftOutline16;
+
+  /**
+   * The host's icon set lives in `@deepseek-ai/dsh-client-ui-primitives`, which
+   * the loader hands over through `dsh.client.inject`. Two things matter here:
+   * the export names moved with the 0.2 line (`<Name>16` → `<Name>Regular` /
+   * `<Name>Medium`), and an injected package may simply not carry the artwork a
+   * future host stopped shipping. Reading a missing name yields `undefined`,
+   * and `React.createElement(undefined)` throws — which would blank this whole
+   * slot rather than just its button — so the lookup is guarded across every
+   * spelling and falls back to artwork drawn here.
+   */
+  var primitives = require("@deepseek-ai/dsh-client-ui-primitives");
+  var HostPanelLeftIcon =
+    primitives.IconPanelLeftOutlineRegular ||
+    primitives.IconPanelLeftOutlineMedium ||
+    primitives.IconPanelLeftOutline16 ||
+    null;
+
+  function PanelLeftIcon(props) {
+    var size = (props && props.size) || 16;
+    if (HostPanelLeftIcon) return React.createElement(HostPanelLeftIcon, props);
+    return React.createElement(
+      "svg",
+      {
+        width: size,
+        height: size,
+        viewBox: "0 0 16 16",
+        fill: "none",
+        stroke: "currentColor",
+        strokeWidth: 1,
+        "aria-hidden": "true",
+        focusable: "false",
+      },
+      React.createElement("rect", { x: 1.5, y: 2.5, width: 13, height: 11, rx: 2.5 }),
+      React.createElement("path", { d: "M6 2.5v11" })
+    );
+  }
 
   var PACKAGE_ID = "dsh-sidebar-panel";
   /**
@@ -1093,7 +1129,7 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
         "data-plugin": PACKAGE_ID,
         onClick: function () { props.togglePanel(); },
       },
-      React.createElement(IconPanelLeftOutline16, { size: 16 })
+      React.createElement(PanelLeftIcon, { size: 16 })
     );
   }
 
@@ -2066,7 +2102,7 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
           order: 30,
           title: function () { return t("panel.title"); },
           description: function () { return t("guide.description"); },
-          icon: IconPanelLeftOutline16,
+          icon: PanelLeftIcon,
         }],
       });
     }, "dsh-sidebar-panel: tab type");

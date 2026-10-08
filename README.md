@@ -86,7 +86,9 @@ dsh-sidebar-panel/
 ├── client/client.js         # 客户端源码：注册右栏页签（类型 + 正文）+ 头部开关 + 四页签 + 右键菜单
 ├── lib/                     # 构建产物：lib/index.js + lib/client.js（由 src/ 与 client/ 生成，勿手改）
 ├── scripts/build.mjs        # 构建：确定性拷贝 + 生成横幅（零构建工具链依赖）
-├── scripts/gates/run.mjs    # 门禁：产物新鲜度 / 入口点 / 名称一致性 / React external / 依赖对齐
+├── scripts/gates/run.mjs    # 门禁：产物新鲜度 / 入口点 / 名称一致性 / React external / 依赖与展示元数据
+├── locale/en.json           # 显示元数据：插件管理器在插件未激活时也读它（en.json 必需，zh.json 为译文）
+├── icon.svg                 # 显示元数据：插件图标（原创作品，导出为 "./icon"）
 ├── test/unit.test.mjs       # 服务端单元测试（mock ctx，无需 DSH 实例）
 ├── test/smoke.client.mjs    # 客户端冒烟：桩运行时断言注册形状 / 导航行为 / chat 切片
 ├── tsconfig.json            # 仅编辑器 / 类型提示用（noEmit，构建流程不调用 tsc）
@@ -114,6 +116,9 @@ curl -H "Origin: http://127.0.0.1:<port>" -H "Content-Type: application/json" -X
 ```
 
 > 源码改动一律改 `src/` 与 `client/`，然后跑 `pnpm run bundle`；`lib/` 是产物，`pnpm run gates` 会逐字节校验它与源码一致，手改 `lib/` 直接失败。
+
+> **依赖声明**：`@deepseek-ai/*` 是宿主运行时的**共享实例**，因此只进 `peerDependencies` + `devDependencies`（`dependencies` 为空）——profile 里的副本会静默遮蔽运行时版本。peer 范围按官方契约覆盖全部 prerelease 元组（见 `package.json`）。
+> **展示元数据**：`icon.svg` + `locale/en.json`（`meta.title` / `meta.description`）是插件管理器的硬性交付项（不激活插件也要读），`pnpm run gates` 一并校验。
 
 ## 已知限制
 

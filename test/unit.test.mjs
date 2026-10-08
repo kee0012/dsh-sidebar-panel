@@ -43,7 +43,15 @@ function makeCtx() {
       if (typeof cleanup === 'function') cleanups.push(cleanup);
       return cleanup;
     },
-    logger: { warn() {}, error() {} },
+    logger: {
+      warn() {},
+      // `apply` is fail-soft on purpose (a throw must not escape into the host),
+      // so the suite has to watch this sink: a swallowed failure would otherwise
+      // look like a plugin that simply registered nothing.
+      error(...args) {
+        ctx._errors.push(args);
+      },
+    },
     sessions: {
       get(id) {
         return sessions.get(id);
@@ -57,6 +65,7 @@ function makeCtx() {
     _listeners: listeners,
     _sessions: sessions,
     _cleanups: cleanups,
+    _errors: [],
     _credentials: undefined,
   };
   return ctx;
@@ -125,6 +134,7 @@ const config = Config({
   usage: { sessionsRoot: SESSIONS_ROOT, warmupDelayMs: 3_600_000, intervalMs: 3_600_000 },
 });
 apply(ctx, config);
+assert.deepEqual(ctx._errors, [], 'apply must register everything without swallowing an error');
 const handler = ctx._routes[0].handler;
 
 // 1. module contract + route registration

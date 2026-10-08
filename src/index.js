@@ -794,7 +794,26 @@ function revealInFileManager(absPath) {
 /* Plugin body                                                         */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Fail-soft entry point.
+ *
+ * A throwing `apply` is reported by the host as a failed plugin, and under
+ * `dsh web` that failure has no visible sink: the routes and listeners are
+ * simply missing, with nothing in the log to explain why. Registration already
+ * goes through `ctx.effect` (so unloading stays automatic and leak-free), and
+ * the request handler and the session listener each guard themselves; this
+ * wrapper exists only so that an unexpected throw on the way in cannot escape
+ * into the host.
+ */
 export function apply(ctx, config) {
+  try {
+    applyPlugin(ctx, config);
+  } catch (error) {
+    ctx.logger?.error?.(`[dsh-sidebar-panel] apply failed: ${error?.stack ?? error}`);
+  }
+}
+
+function applyPlugin(ctx, config) {
   const base = ROUTE_BASE;
 
   const handler = async (request, response) => {

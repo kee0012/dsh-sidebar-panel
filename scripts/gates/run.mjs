@@ -46,6 +46,7 @@ function stripBanner(text) {
 
 const pkg = JSON.parse(await readSource('package.json'));
 const patch = await readSource('cordis.patch.yml');
+const localeEn = JSON.parse(await readSource('locale/en.json'));
 const sources = {
   'src/index.js': await readSource('src/index.js'),
   'client/client.js': await readSource('client/client.js'),
@@ -158,28 +159,66 @@ const GATES = [
     'files 字段：包含分发所需条目',
     () => {
       if (!Array.isArray(pkg.files)) throw new Error('package.json 缺少 files 字段');
-      const required = ['lib', 'cordis.patch.yml', 'README.md'];
+      const required = ['lib', 'cordis.patch.yml', 'README.md', 'locale/*.json', 'icon.svg'];
       const missing = required.filter((f) => !pkg.files.includes(f));
       if (missing.length) throw new Error(`files 缺少: ${missing.join(', ')}`);
       return pkg.files.join(', ');
     },
   ],
   [
-    '服务端依赖已声明（link 部署自带依赖）',
+    '共享实例包只放 peer + dev（绝不进 dependencies）',
     () => {
       const deps = Object.keys(pkg.dependencies ?? {});
-      if (deps.length === 0) throw new Error('dependencies 为空：link 到工作区外的安装形态将无法解析官方包');
-      return deps.join(', ');
+      if (deps.length) {
+        throw new Error(`dependencies 必须为空（profile 内副本会静默遮蔽宿主运行时版本）: ${deps.join(', ')}`);
+      }
+      return 'no runtime dependencies';
     },
   ],
   [
-    '依赖版本与 DSH 0.2.x 宿主对齐（schemastery ^3.18.4 / dsh-credentials ^0.2.0-rc.2）',
+    'peer / dev 依赖与宿主契约对齐（schemastery ^3.18.2 + dsh-credentials 全 prerelease 区间）',
     () => {
-      const schema = pkg.dependencies?.['@deepseek-ai/schemastery'];
-      const creds = pkg.dependencies?.['@deepseek-ai/dsh-credentials'];
-      if (schema !== '^3.18.4') throw new Error(`schemastery 应为 ^3.18.4，实际 ${schema}`);
-      if (creds !== '^0.2.0-rc.2') throw new Error(`dsh-credentials 应为 ^0.2.0-rc.2，实际 ${creds}`);
-      return 'aligned with the shipped host runtime';
+      const DSH_PEER_RANGE =
+        '>=0.1.2-rc.1 <0.2.0 || >=0.1.5-alpha.1 <0.2.0 || >=0.1.6-0 <0.2.0 || >=0.1.7-0 <0.2.0 || >=0.2.0-0 <0.3.0 || >=0.2.1-0 <0.3.0';
+      const peers = pkg.peerDependencies ?? {};
+      const dev = pkg.devDependencies ?? {};
+      if (peers['@deepseek-ai/schemastery'] !== '^3.18.2') {
+        throw new Error(`schemastery peer 应为 ^3.18.2，实际 ${peers['@deepseek-ai/schemastery']}`);
+      }
+      if (peers['@deepseek-ai/dsh-credentials'] !== DSH_PEER_RANGE) {
+        throw new Error(`dsh-credentials peer 范围与官方契约不一致，实际 ${peers['@deepseek-ai/dsh-credentials']}`);
+      }
+      for (const name of Object.keys(peers)) {
+        if (!dev[name]) throw new Error(`devDependencies 缺少 ${name}：本 checkout 将无法本地解析`);
+      }
+      return `${Object.keys(peers).join(', ')}（peer = dev）`;
+    },
+  ],
+  [
+    '宿主版本与包管理器固定（engines.node 覆盖 22 + 24，packageManager = pnpm@11.7.0）',
+    () => {
+      const node = pkg.engines?.node;
+      if (typeof node !== 'string' || !/\b22\b/.test(node) || !/\b24\b/.test(node)) {
+        throw new Error(`engines.node 必须同时允许 Node 22 与 24，实际 ${node}`);
+      }
+      if (pkg.packageManager !== 'pnpm@11.7.0') {
+        throw new Error(`packageManager 应为 pnpm@11.7.0，实际 ${pkg.packageManager}`);
+      }
+      return `${node}; ${pkg.packageManager}`;
+    },
+  ],
+  [
+    '展示元数据：locale meta + 导出图标（Plugin Manager 不激活插件也要读）',
+    () => {
+      if (pkg.exports?.['./locale/*.json'] !== './locale/*.json') throw new Error('exports 缺少 "./locale/*.json"');
+      if (typeof pkg.exports?.['./icon'] !== 'string') throw new Error('exports 缺少 "./icon"');
+      if (typeof pkg.icon !== 'string' || pkg.icon === '') throw new Error('package.json 顶层 icon 缺失');
+      if (pkg.dsh?.manifestVersion !== 1) throw new Error(`dsh.manifestVersion 应为 1，实际 ${pkg.dsh?.manifestVersion}`);
+      const title = localeEn?.meta?.title;
+      const description = localeEn?.meta?.description;
+      if (typeof title !== 'string' || title.trim() === '') throw new Error('locale/en.json 缺少 meta.title');
+      if (typeof description !== 'string' || description.trim() === '') throw new Error('locale/en.json 缺少 meta.description');
+      return `${title} — ${description}`;
     },
   ],
 ];

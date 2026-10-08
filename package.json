@@ -1,6 +1,6 @@
 {
   "name": "dsh-sidebar-panel",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "DSH (DeepSeek Harness) right-side panel plugin: a tab of the shipped right column with overview (context/cost/usage), files (workspace tree + right-click reference/copy/reveal), changes (files written this session) and tools (tool-call details).",
   "type": "module",
   "license": "MIT",
@@ -23,17 +23,26 @@
     "url": "https://github.com/kee0012/dsh-sidebar-panel/issues"
   },
   "main": "lib/index.js",
-  "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.4",
-    "@deepseek-ai/dsh-credentials": "^0.2.0-rc.2"
+  "icon": "./icon.svg",
+  "//deps": "Harness packages are shared instances of the running host, so they are peer + dev only: a profile-local copy would silently shadow the runtime version. devDependencies keep this checkout self-contained for local development.",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-credentials": ">=0.1.2-rc.1 <0.2.0 || >=0.1.5-alpha.1 <0.2.0 || >=0.1.6-0 <0.2.0 || >=0.1.7-0 <0.2.0 || >=0.2.0-0 <0.3.0 || >=0.2.1-0 <0.3.0",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-credentials": "^0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.4"
   },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
     "./package.json": "./package.json"
   },
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
@@ -54,11 +63,17 @@
     "src",
     "client",
     "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
     "README.md",
     "README_EN.md",
     "SECURITY.md",
     "LICENSE"
   ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@11.7.0",
   "scripts": {
     "bundle": "node scripts/build.mjs",
     "gates": "node scripts/gates/run.mjs",

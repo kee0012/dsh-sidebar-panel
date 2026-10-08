@@ -86,7 +86,9 @@ dsh-sidebar-panel/
 ├── client/client.js         # client source: right-column tab (type + body) + header toggle + four tabs + context menu
 ├── lib/                     # build output: lib/index.js + lib/client.js (generated from src/ and client/ — do not hand-edit)
 ├── scripts/build.mjs        # build: deterministic copy + banner generation (zero build-toolchain dependencies)
-├── scripts/gates/run.mjs    # gates: artifact freshness / entry points / name consistency / React external / dependency alignment
+├── scripts/gates/run.mjs    # gates: artifact freshness / entry points / name consistency / React external / deps + display metadata
+├── locale/en.json           # display metadata: the Plugin Manager reads it even when the plugin is not activated (en.json required, zh.json is the translation)
+├── icon.svg                 # display metadata: the plugin icon (original artwork, exported as "./icon")
 ├── test/unit.test.mjs       # server unit tests (mocked ctx, no DSH instance)
 ├── test/smoke.client.mjs    # client smoke: stub runtime asserting registration shape / navigation / chat slice
 ├── tsconfig.json            # editor / type hints only (noEmit; the build never calls tsc)
@@ -115,6 +117,9 @@ curl -H "Origin: http://127.0.0.1:<port>" -H "Content-Type: application/json" -X
 ```
 
 > Source changes always go into `src/` and `client/`, and then `pnpm run bundle`. `lib/` is build output; `pnpm run gates` byte-compares it against the sources, so hand-editing `lib/` fails outright.
+
+> **Dependencies**: every `@deepseek-ai/*` package is a *shared instance* of the running host, so it belongs in `peerDependencies` + `devDependencies` only (`dependencies` stays empty) — a profile-local copy would silently shadow the runtime version. The peer ranges follow the official contract and cover every prerelease tuple (see `package.json`).
+> **Display metadata**: `icon.svg` plus `locale/en.json` (`meta.title` / `meta.description`) are a hard delivery requirement of the Plugin Manager, which reads them even while the plugin is inactive; `pnpm run gates` checks them too.
 
 ## Known limitations
 
