@@ -18,6 +18,12 @@
  *                understands the tool-result node shape (head fields nested on
  *                `call`). The panel's close button closes its own tab through
  *                `useTabInfo().tab.actions.close()`.
+ *   D. css     — the stylesheet is published under the host's own ownership
+ *                tags (`data-plugin` + `data-plugin-css`). The DSH module
+ *                loader claims every UNTAGGED <style> for whichever plugin it
+ *                materializes next and drops those tags on that plugin's next
+ *                rebuild, so an untagged sheet is a sheet that silently
+ *                disappears mid-session (and comes back on restart).
  *
  *   node test/smoke.client.mjs
  */
@@ -35,22 +41,117 @@ const BUNDLE_SOURCE = readFileSync(new URL('../client/client.js', import.meta.ur
 const loaded = [];
 globalThis.window = { __ModuleLoader__: { load: m => loaded.push(m) } };
 
-function makeEl() {
-  return {
-    style: {}, dataset: {}, children: [], isConnected: false,
+/* A DOM stub just rich enough for the stylesheet contract this bundle depends
+ * on: attribute-aware `getElementById` / `querySelector(All)` over a real
+ * parent/child tree. It has to be attribute-aware, because the host's module
+ * loader claims every UNTAGGED `<style>` for whichever plugin materializes
+ * next, then deletes it on that plugin's next rebuild — so this test must be
+ * able to ask which attributes our sheet actually carries. Only the selector
+ * shapes the bundle and that host contract actually use are supported. */
+// `e.target instanceof Element` guards appear in the bundle's click handlers, so
+// stub elements need a real prototype to match against.
+class ElementStub {}
+globalThis.Element = ElementStub;
+
+function makeEl(tag = 'div') {
+  const el = {
+    tagName: String(tag).toUpperCase(),
+    attributes: new Map(),
+    style: {}, dataset: {}, children: [], parentNode: null, isConnected: false,
     textContent: '', title: '', className: '',
-    setAttribute() {}, appendChild(c) { this.children.push(c); },
-    addEventListener() {}, remove() { this.isConnected = false; },
+    setAttribute(name, value) { this.attributes.set(name, String(value)); },
+    getAttribute(name) { return this.attributes.has(name) ? this.attributes.get(name) : null; },
+    hasAttribute(name) { return this.attributes.has(name); },
+    removeAttribute(name) { this.attributes.delete(name); },
+    appendChild(child) {
+      if (child.parentNode) child.parentNode.removeChild(child);
+      child.parentNode = this;
+      child.isConnected = true;
+      this.children.push(child);
+      return child;
+    },
+    removeChild(child) {
+      const at = this.children.indexOf(child);
+      if (at !== -1) this.children.splice(at, 1);
+      child.parentNode = null;
+      child.isConnected = false;
+      return child;
+    },
+    addEventListener() {},
+    remove() { if (this.parentNode) this.parentNode.removeChild(this); },
+    closest(selector) {
+      for (let node = this; node; node = node.parentNode) {
+        if (node.tagName && matchesSelector(node, selector)) return node;
+      }
+      return null;
+    },
   };
+  Object.setPrototypeOf(el, ElementStub.prototype);
+  // As in a real DOM, `el.id = x` writes the `id` attribute, which is where
+  // `getElementById` reads it back from.
+  Object.defineProperty(el, 'id', {
+    get() { return this.attributes.get('id') ?? ''; },
+    set(value) { this.setAttribute('id', value); },
+  });
+  return el;
 }
+
+const ATTR_EQ = /^([a-zA-Z0-9]*)\[([a-zA-Z-]+)=("(?:[^"\\]|\\.)*")\]$/;
+const ID_NOT_ATTR = /^([a-zA-Z0-9]*)#([A-Za-z0-9_-]+):not\(\[([a-zA-Z-]+)\]\)$/;
+const TAG_NOT_ATTR = /^([a-zA-Z0-9]+):not\(\[([a-zA-Z-]+)\]\)$/;
+const HAS_ATTR = /^([a-zA-Z0-9]*)\[([a-zA-Z-]+)\]$/;
+const CLASS_SEL = /^\.([A-Za-z0-9_-]+)$/;
+
+function matchesSelector(el, selector) {
+  let m = ATTR_EQ.exec(selector);
+  if (m) {
+    const [, tag, name, rawValue] = m;
+    return (!tag || el.tagName === tag.toUpperCase()) && el.getAttribute(name) === JSON.parse(rawValue);
+  }
+  m = ID_NOT_ATTR.exec(selector);
+  if (m) {
+    const [, tag, id, name] = m;
+    return (!tag || el.tagName === tag.toUpperCase()) && el.getAttribute('id') === id && !el.hasAttribute(name);
+  }
+  m = TAG_NOT_ATTR.exec(selector);
+  if (m) {
+    const [, tag, name] = m;
+    return el.tagName === tag.toUpperCase() && !el.hasAttribute(name);
+  }
+  m = HAS_ATTR.exec(selector);
+  if (m) {
+    const [, tag, name] = m;
+    return (!tag || el.tagName === tag.toUpperCase()) && el.hasAttribute(name);
+  }
+  m = CLASS_SEL.exec(selector);
+  if (m) return String(el.className ?? '').split(/\s+/).includes(m[1]);
+  throw new Error('smoke DOM stub: unsupported selector ' + selector);
+}
+
+const docRoot = makeEl('html');
+const docHead = makeEl('head');
+const docBody = makeEl('body');
+docRoot.appendChild(docHead);
+docRoot.appendChild(docBody);
+docRoot.isConnected = true;
+
+function allElements() {
+  const out = [];
+  (function walk(node) {
+    for (const child of node.children) { out.push(child); walk(child); }
+  })(docRoot);
+  return out;
+}
+
 globalThis.document = {
-  documentElement: { lang: 'zh' },
-  head: makeEl(),
-  body: makeEl(),
-  getElementById: () => null,
+  documentElement: docRoot,
+  head: docHead,
+  body: docBody,
   createElement: makeEl,
-  createElementNS: makeEl,
-  querySelector: () => null,
+  createElementNS: (ns, tag) => makeEl(tag),
+  getElementById: id => allElements().find(el => el.getAttribute('id') === id) ?? null,
+  querySelector: selector => allElements().find(el => matchesSelector(el, selector)) ?? null,
+  querySelectorAll: selector => allElements().filter(el => matchesSelector(el, selector)),
 };
 globalThis.localStorage = { store: {}, getItem(k) { return this.store[k] ?? null; }, setItem(k, v) { this.store[k] = String(v); } };
 globalThis.MutationObserver = class { observe() {} disconnect() {} };
@@ -360,6 +461,50 @@ let closeCallsRef = [];
 
   localStorage.store = {};
   console.log('✓ tab body: chat-slice tool list + tab.actions.close()');
+}
+
+/* ---------------- D. stylesheet ownership ---------------- */
+
+{
+  // The host's module loader hands every UNTAGGED <style> to whichever plugin
+  // materializes next, then deletes it again when that plugin is rebuilt or
+  // pruned. That is how this panel used to lose its styles mid-session while
+  // the app kept running. This case pins the fix.
+  for (const el of docHead.children.slice()) el.remove();
+
+  const exports = load();
+  exports.apply(makeCtx().ctx);
+
+  const ours = docHead.children.filter(el => el.getAttribute('data-plugin') === PACKAGE_ID);
+  assert.equal(ours.length, 1, 'exactly one tagged sheet must be published');
+  assert.equal(ours[0].getAttribute('data-plugin-css'), PACKAGE_ID + '/client.css',
+    'the sheet needs the same idempotence key the host CSS emitter writes');
+  assert.ok(ours[0].textContent.includes('.dsp'), 'the sheet must carry the real stylesheet');
+
+  assert.deepEqual(document.querySelectorAll('style:not([data-plugin])'), [],
+    'an untagged sheet is one the host will hand to an unrelated plugin and delete on its next rebuild');
+
+  // A second apply must reuse the sheet instead of stacking another copy.
+  const before = docHead.children.length;
+  exports.apply(makeCtx().ctx);
+  assert.equal(docHead.children.length, before, 'installStyles must be idempotent');
+  assert.equal(document.querySelectorAll('style[data-plugin-css="dsh-sidebar-panel/client.css"]').length, 1);
+
+  // A leftover from an untagged earlier release is evicted, not left claimable.
+  for (const el of docHead.children.slice()) el.remove();
+  const legacy = makeEl('style');
+  legacy.id = PACKAGE_ID + '-styles';
+  legacy.textContent = '/* legacy */';
+  docHead.appendChild(legacy);
+  assert.equal(document.querySelectorAll('style:not([data-plugin])').length, 1, 'precondition: one untagged sheet');
+
+  exports.apply(makeCtx().ctx);
+  assert.equal(document.querySelectorAll('style#dsh-sidebar-panel-styles:not([data-plugin])').length, 0,
+    'the untagged leftover must be evicted');
+  assert.equal(docHead.children.filter(el => el.getAttribute('data-plugin') === PACKAGE_ID).length, 1,
+    'and replaced by exactly one tagged sheet');
+
+  console.log('✓ stylesheet ownership: tagged, idempotent, untagged leftovers evicted');
 }
 
 for (const cleanup of cleanups) cleanup();
