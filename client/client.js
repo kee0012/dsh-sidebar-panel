@@ -130,6 +130,13 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     "account.noKey": "未配置 DEEPSEEK_API_KEY（在 DSH 凭据/环境变量中配置）",
     "account.queryFailed": "余额查询失败：{message}",
     "account.loading": "查询余额中…",
+    "account.today": "今日已用",
+    "account.todayHint": "按本机 DSH 会话日志与 DeepSeek 官方价目估算，涵盖全部工作区；仅统计今日已完成的请求。",
+    "account.todayNoStore": "会话存储服务不可用，暂时无法统计今日用量",
+    "account.todayScanFailed": "今日用量统计失败",
+    "account.peak": "峰",
+    "account.valley": "谷",
+    "account.peakTitle": "高峰：北京时间周一至周五 9:00–12:00、14:00–18:00；其余时段（夜间、周末、法定节假日）为空闲时段，价目按官方峰谷价。",
     "files.title": "工作区文件",
     "files.refresh": "刷新",
     "files.up": "上级目录",
@@ -215,6 +222,13 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     "account.noKey": "DEEPSEEK_API_KEY is not configured (set it in DSH credentials/env)",
     "account.queryFailed": "Balance query failed: {message}",
     "account.loading": "Querying balance…",
+    "account.today": "Used today",
+    "account.todayHint": "Estimated from this machine's DSH session logs and DeepSeek's official price list, across every workspace; finished requests only.",
+    "account.todayNoStore": "The session store is unavailable, so today's usage cannot be totalled",
+    "account.todayScanFailed": "Failed to total today's usage",
+    "account.peak": "Peak",
+    "account.valley": "Valley",
+    "account.peakTitle": "Peak: weekdays 09:00–12:00 and 14:00–18:00 Beijing time. Everything else — nights, weekends and Chinese statutory holidays — is off-peak, priced at the official valley rate.",
     "files.title": "Workspace Files",
     "files.refresh": "Refresh",
     "files.up": "Parent",
@@ -458,6 +472,18 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     var d = new Date(ms);
     var p = function (n) { return (n < 10 ? "0" : "") + n; };
     return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  }
+
+  /**
+   * A remaining span as `HH:MM:SS`. Distinct from `fmtClock` (a wall-clock
+   * stamp) and from `fmtDuration` (a prose "1小时2分3秒"), because the peak
+   * countdown must tick in place: fixed-width digits, no unit words, so the row
+   * never reflows as the seconds change.
+   */
+  function fmtCountdown(ms) {
+    var total = Math.max(0, Math.floor((ms || 0) / 1000));
+    var p = function (n) { return (n < 10 ? "0" : "") + n; };
+    return p(Math.floor(total / 3600)) + ":" + p(Math.floor((total % 3600) / 60)) + ":" + p(total % 60);
   }
 
   function prettyJson(raw) {
@@ -927,6 +953,16 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
 .dsp__btn--primary { border-color: var(--dsw-alias-button-primary-fill, #4f6ef7); background: var(--dsw-alias-button-primary-fill, #4f6ef7); color: var(--dsw-alias-label-primary-inverted, #fff); }
 .dsp__btn--primary:hover { border-color: var(--dsw-alias-button-primary-hover, #3b5de7); background: var(--dsw-alias-button-primary-hover, #3b5de7); color: var(--dsw-alias-label-primary-inverted, #fff); }
 .dsp__accountBalance { font-size: 22px; font-weight: 600; letter-spacing: -0.2px; }
+.dsp__accountToday { font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-secondary, #c8c8c8); font-variant-numeric: tabular-nums; }
+.dsp__peakRow { display: flex; align-items: center; gap: 8px; padding: 4px 0 1px; }
+/* Peak is red, valley is green — the two states must be told apart at a glance,
+   so the colour sits on the pill AND on the countdown that shares the row. */
+.dsp__peakRow--peak { color: var(--dsw-alias-state-error-primary, #e05a5a); }
+.dsp__peakRow--valley { color: var(--dsw-alias-state-success-primary, #3fae74); }
+.dsp__peakPill { flex: none; min-width: 26px; padding: 1px 7px; border-radius: 7px; color: #fff; font-size: 11px; font-weight: 600; line-height: 16px; text-align: center; }
+.dsp__peakRow--peak .dsp__peakPill { background: #c0392b; }
+.dsp__peakRow--valley .dsp__peakPill { background: #2f9e63; }
+.dsp__peakClock { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: 0.2px; }
 .dsp__crumbs { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary, #666); font-size: 12px; }
 .dsp__file { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 6px; cursor: default; }
 .dsp__file:hover { background: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / 5%)); }
@@ -1060,6 +1096,31 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
   }
 
   /* ------------------------------------------------------------------ */
+  /* Peak/valley countdown                                               */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * A self-ticking countdown to `props.to` (epoch ms). It owns its interval
+   * rather than borrowing the overview poller: that poller runs at 15s, and a
+   * clock that jumped 15 seconds at a time would read as broken. Ticks are
+   * skipped while the page is hidden (`isPageHidden`), so a panel left in a
+   * background window costs nothing; each render recomputes the span from
+   * `Date.now()` instead of decrementing a counter, so a skipped tick (or a
+   * laptop waking from sleep) re-syncs on the very next render.
+   */
+  function Countdown(props) {
+    var bump = React.useReducer(function (n) { return n + 1; }, 0)[1];
+    React.useEffect(function () {
+      var id = window.setInterval(function () {
+        if (!isPageHidden()) bump();
+      }, 1000);
+      return function () { window.clearInterval(id); };
+    }, []);
+    var text = props.to ? fmtCountdown(props.to - Date.now()) : "—";
+    return React.createElement("span", { className: props.className, title: props.title }, text);
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Overview tab                                                        */
   /* ------------------------------------------------------------------ */
 
@@ -1074,6 +1135,9 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     var [outputBudget, setOutputBudget] = React.useState(null);
     var [balance, setBalance] = React.useState(null);
     var [accountError, setAccountError] = React.useState(null);
+    var [todayUsage, setTodayUsage] = React.useState(null);
+    var [todayError, setTodayError] = React.useState(null);
+    var [peak, setPeak] = React.useState(null);
     var slice = useChatSlice(props);
     var nodes = slice ? slice.nodes : null;
 
@@ -1126,7 +1190,10 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
 
     // DeepSeek account balance — official user/balance endpoint via the
     // server route (the API key never reaches the browser). Polled every 15s:
-    // balances change slowly, unlike the 5s session figures above.
+    // balances change slowly, unlike the 5s session figures above. The same
+    // tick carries today's spend and the peak/valley window (also server-side:
+    // the price table and the official schedule both live there, and the scan
+    // is cached for 60s), so the whole account card refreshes in one pass.
     React.useEffect(function () {
       var cancelled = false;
       var timer = null;
@@ -1141,6 +1208,22 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
         }).catch(function (err) {
           if (cancelled) return;
           setAccountError({
+            code: (err && err.code) || "CLIENT",
+            message: (err && err.message) || String(err),
+          });
+        });
+        // Kept in its own state (and its own error slot): a usage scan that
+        // fails must not blank out a balance that arrived fine, and vice versa.
+        apiGet("/usage-today").then(function (data) {
+          if (cancelled) return;
+          if (data && data.ok) {
+            setPeak(data.peak || null);
+            setTodayUsage(data.today || null);
+            setTodayError(data.today ? null : (data.error || null));
+          }
+        }).catch(function (err) {
+          if (cancelled) return;
+          setTodayError({
             code: (err && err.code) || "CLIENT",
             message: (err && err.message) || String(err),
           });
@@ -1181,6 +1264,28 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     var hasAny = usage !== undefined || pressure !== undefined || (server && server.requestCount > 0);
 
     // DeepSeek account card: always visible (even with no requests yet).
+    // Today's spend and the peak/valley window sit directly under the balance,
+    // inside the same card. They render even when the balance does not — an
+    // unconfigured API key must not hide a figure that only needs local session
+    // logs — and a failure is carried as a tooltip on the label rather than as
+    // another warning line, so the card keeps the balance's prominence.
+    var todayHintText = !todayError
+      ? t("account.todayHint")
+      : todayError.code === "NO_SESSION_STORE"
+        ? t("account.todayNoStore")
+        : t("account.todayScanFailed") + " · " + todayError.message;
+    var todayRow = React.createElement("div", { className: "dsp__row", title: todayHintText },
+      React.createElement("span", { className: "dsp__muted" }, t("account.today")),
+      React.createElement("span", { className: "dsp__accountToday" },
+        todayUsage ? fmtMoney(Number(todayUsage.cost), todayUsage.currency || "CNY") : "—"));
+    var peakRow = peak
+      ? React.createElement("div", {
+          className: "dsp__peakRow dsp__peakRow--" + (peak.active ? "peak" : "valley"),
+          title: t("account.peakTitle"),
+        },
+        React.createElement("span", { className: "dsp__peakPill" }, peak.active ? t("account.peak") : t("account.valley")),
+        React.createElement(Countdown, { className: "dsp__peakClock", to: peak.nextChangeAt }))
+      : null;
     var accountCard = React.createElement(
       "div",
       { className: "dsp__card" },
@@ -1199,7 +1304,9 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
         : accountError
           ? React.createElement("div", { className: "dsp__notice" },
               accountError.code === "NO_API_KEY" ? t("account.noKey") : t("account.queryFailed", { message: accountError.message }))
-          : React.createElement("div", { className: "dsp__notice" }, t("account.loading"))
+          : React.createElement("div", { className: "dsp__notice" }, t("account.loading")),
+      todayRow,
+      peakRow
     );
 
     return React.createElement(

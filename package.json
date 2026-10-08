@@ -1,6 +1,6 @@
 {
   "name": "dsh-sidebar-panel",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "DSH (DeepSeek Harness) right-side panel plugin: a tab of the shipped right column with overview (context/cost/usage), files (workspace tree + right-click reference/copy/reveal), changes (files written this session) and tools (tool-call details).",
   "type": "module",
   "license": "MIT",

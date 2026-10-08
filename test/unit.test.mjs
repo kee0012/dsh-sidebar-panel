@@ -44,12 +44,14 @@ function makeCtx() {
     },
     get(name) {
       if (name === 'credentials') return ctx._credentials;
+      if (name === 'sessionPersistence') return ctx._persistence;
       return undefined;
     },
     _routes: routes,
     _listeners: listeners,
     _sessions: sessions,
     _credentials: undefined,
+    _persistence: undefined,
   };
   return ctx;
 }
@@ -256,10 +258,14 @@ console.log('✓ module contract + route registration');
   assert.equal(m.miss, 100 + 200);
   assert.equal(m.output, 50 + 30);
   assert.equal(m.total, 2080);
-  // on-peak cost: (100*2 + 900*0.5 + 50*8)/1e6 + (200*2 + 800*0.5 + 30*8)/1e6
-  // = 0.00209 (6-decimal precision now, no rounding to 0.0021)
-  assert.ok(Math.abs(data.overview.cost - 0.00209) < 1e-9, `cost=${data.overview.cost} expected=0.00209`);
-  assert.ok(Math.abs(m.cost - 0.00209) < 1e-9, `byModel cost=${m.cost}`);
+  // Cost with the default (official) table — valley 1 / hit 0.02 / write 1 /
+  // out 4 CNY per million tokens, doubled at peak. `base` is 10:00 Beijing on a
+  // weekday, so both calls are peak:
+  //   2 × (100*1 + 900*0.02 + 50*4)/1e6 = 0.000636
+  // + 2 × (200*1 + 800*0.02 + 30*4)/1e6 = 0.000672
+  // = 0.001308 (6-decimal precision, no rounding to 0.0013)
+  assert.ok(Math.abs(data.overview.cost - 0.001308) < 1e-9, `cost=${data.overview.cost} expected=0.001308`);
+  assert.ok(Math.abs(m.cost - 0.001308) < 1e-9, `byModel cost=${m.cost}`);
   assert.equal(data.overview.currency, 'CNY');
   assert.ok(data.overview.runtimeMs > 0);
   console.log('✓ overview fold: requests/tokens/cost/runtime');
@@ -589,6 +595,145 @@ console.log('✓ module contract + route registration');
   assert.equal(data.changes[0].path, 'D:/x/lazy.ts');
   assert.deepEqual(asked, [0], 'the first fold reads from the very beginning');
   console.log('✓ unvisited session skipped; first access back-fills full history');
+}
+
+/* ------------------------------------------------------------------ */
+/* Official peak/valley schedule + /usage-today                        */
+/* ------------------------------------------------------------------ */
+
+// Beijing wall-clock instant → epoch ms.
+const BJ = (y, m, d, h) => Date.UTC(y, m - 1, d, h) - 8 * 3600 * 1000;
+
+const realNow = Date.now;
+const atInstant = (ms) => {
+  Date.now = () => ms;
+};
+const restoreNow = () => {
+  Date.now = realNow;
+};
+
+/** One million input tokens on a model, at `time`, as a session event pair. */
+function usageEvents(model, time, inputTokens) {
+  return [
+    { type: 'request/header', seq: 0, time, data: { header: { config: { provider: 'deepseek-official', model } } } },
+    { type: 'assistant/message', seq: 1, time, data: { usage: { inputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 } } },
+  ];
+}
+
+/** A fake persistence backend over a map of id → { path, events }. */
+function fakePersistence(entries) {
+  const store = new Map(entries);
+  return {
+    store,
+    async list() {
+      return [...store.entries()].map(([id, entry]) => ({
+        header: { id, cwd: 'D:/ws' },
+        revision: 1,
+        sizeBytes: entry.events.length * 512,
+      }));
+    },
+    locate(header) {
+      return { kind: 'jsonl', path: store.get(header.id).path };
+    },
+    async open(id) {
+      const entry = store.get(id);
+      return {
+        header: { id, cwd: 'D:/ws' },
+        async read() {
+          return { eventState: 'current', events: entry.events };
+        },
+        async close() {},
+      };
+    },
+  };
+}
+
+// 12. The schedule itself, read off the route (no store needed: `peak` is
+// computed before the scan, so these assertions never touch a session log).
+{
+  const cases = [
+    // [instant, peak?, next flip, why]
+    [BJ(2026, 10, 8, 10), true, BJ(2026, 10, 8, 12), 'Thursday 10:00 inside 09-12'],
+    [BJ(2026, 10, 8, 13), false, BJ(2026, 10, 8, 14), 'Thursday 13:00 is the lunch valley'],
+    [BJ(2026, 10, 8, 15), true, BJ(2026, 10, 8, 18), 'Thursday 15:00 inside 14-18'],
+    [BJ(2026, 10, 8, 20), false, BJ(2026, 10, 9, 9), 'Thursday night waits for Friday 09:00'],
+    [BJ(2026, 10, 10, 10), false, BJ(2026, 10, 12, 9), 'Saturday is valley all day'],
+    [BJ(2026, 10, 1, 10), false, BJ(2026, 10, 8, 9), 'National Day holiday is valley all day'],
+  ];
+  ctx._persistence = undefined;
+  for (const [instant, expectedPeak, expectedNext, why] of cases) {
+    atInstant(instant);
+    const res = makeRes();
+    await handler(makeReq('GET', '/dsh-sidebar-panel/api/usage-today', OK_HEADERS), res);
+    const data = parse(res);
+    restoreNow();
+    assert.equal(data.peak.active, expectedPeak, why);
+    assert.equal(data.peak.nextChangeAt, expectedNext, `next flip after: ${why}`);
+    // No store is the documented degradation: the indicator still works.
+    assert.equal(data.today, null);
+    assert.equal(data.error.code, 'NO_SESSION_STORE');
+  }
+  console.log('✓ official peak/valley schedule (weekday windows, weekends, holidays)');
+}
+
+// 13. Today's spend: peak and valley priced from the official table, and a log
+// untouched since midnight skipped without being decoded.
+{
+  const day = Date.UTC(2026, 9, 8, 12); // 2026-10-08 20:00 +08
+  const dayStart = Date.UTC(2026, 9, 7, 16); // 2026-10-08 00:00 +08
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsp-usage-'));
+  const freshPath = path.join(dir, 'fresh.jsonl');
+  const stalePath = path.join(dir, 'stale.jsonl');
+  await fs.writeFile(freshPath, '');
+  await fs.writeFile(stalePath, '');
+  await fs.utimes(freshPath, new Date(day), new Date(day));
+  await fs.utimes(stalePath, new Date(dayStart - 86400000), new Date(dayStart - 86400000));
+
+  // Flash valley = 1 CNY/M input, peak = ×2. 10:00 +08 is peak, 13:00 is valley.
+  const fresh = [
+    ...usageEvents('deepseek-v4-flash', Date.UTC(2026, 9, 8, 2), 1000000),
+    ...usageEvents('deepseek-v4-flash', Date.UTC(2026, 9, 8, 5), 1000000),
+  ];
+  const stale = usageEvents('deepseek-v4-flash', Date.UTC(2026, 9, 8, 5), 1000000);
+  ctx._persistence = fakePersistence([['sess-fresh', { path: freshPath, events: fresh }], ['sess-stale', { path: stalePath, events: stale }]]);
+
+  atInstant(day);
+  const res = makeRes();
+  await handler(makeReq('GET', '/dsh-sidebar-panel/api/usage-today', OK_HEADERS), res);
+  restoreNow();
+  const data = parse(res);
+  assert.equal(data.ok, true);
+  assert.equal(data.today.day, '2026-10-08');
+  assert.equal(data.today.requests, 2, 'one billed message per usage event');
+  assert.equal(data.today.sessions, 1, 'the untouched log is filtered out before decode');
+  assert.equal(data.today.skipped, 0);
+  assert.equal(data.today.cost, 3, '2 (peak) + 1 (valley) CNY');
+  assert.equal(data.today.currency, 'CNY');
+  assert.equal(data.peak.active, false, '20:00 Beijing is valley');
+  assert.equal(data.today.byModel[0].model, 'deepseek-v4-flash');
+  console.log("✓ /usage-today prices today's peak+valley usage and skips stale logs");
+}
+
+// 14. A Pro model prices at its own (3×) official rate — the built-in table is
+// matched by substring, so a variant id still lands on the right row.
+{
+  const day = Date.UTC(2026, 9, 9, 12); // 2026-10-09 20:00 +08
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsp-usage-pro-'));
+  const logPath = path.join(dir, 'pro.jsonl');
+  await fs.writeFile(logPath, '');
+  await fs.utimes(logPath, new Date(day), new Date(day));
+  ctx._persistence = fakePersistence([['sess-pro', {
+    path: logPath,
+    events: usageEvents('deepseek-v4-pro-2026', Date.UTC(2026, 9, 9, 5), 1000000),
+  }]]);
+
+  atInstant(day);
+  const res = makeRes();
+  await handler(makeReq('GET', '/dsh-sidebar-panel/api/usage-today', OK_HEADERS), res);
+  restoreNow();
+  const data = parse(res);
+  assert.equal(data.today.cost, 4.5, 'Pro valley input price is 4.5 CNY/M');
+  console.log('✓ /usage-today resolves the built-in official table by model id substring');
 }
 
 console.log('\nALL UNIT TESTS PASSED');

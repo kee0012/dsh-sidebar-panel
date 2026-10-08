@@ -10,11 +10,14 @@
  *   GET  /dsh-sidebar-panel/api/changes?sessionId    files written by tools this session
  *   GET  /dsh-sidebar-panel/api/balance              DeepSeek account balance via the official
  *                                                    user/balance endpoint (key from ctx.credentials)
+ *   GET  /dsh-sidebar-panel/api/usage-today          today's estimated spend over every stored
+ *                                                    session + the official peak/valley state
  *
- * The overview cost uses a configurable pricing table with DeepSeek-style
- * peak/valley (off-peak) windows; request usage and timestamps are folded
- * from each session's durable event log (`session/event` + `snapshotEvents()`),
- * the same mechanism the token-meter uses.
+ * The overview cost uses the official DeepSeek price table with the official
+ * peak/valley schedule (weekday 09:00-12:00 / 14:00-18:00 Beijing time is peak;
+ * nights, weekends and statutory holidays are valley); request usage and
+ * timestamps are folded from each session's durable event log (`session/event`
+ * + `snapshotEvents()`), the same mechanism the token-meter uses.
  */
 import { readdir, stat, open } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
@@ -59,23 +62,32 @@ export const Config = Schema.object({
   pricing: Schema.object({
     enabled: Schema.boolean().default(true),
     currency: Schema.string().default('CNY'),
-    offPeakStartHour: Schema.number().default(0.5),
-    offPeakEndHour: Schema.number().default(8.5),
-    offPeakMultiplier: Schema.number().default(0.5),
+    // Peak windows in Beijing time, as [startHour, endHour) pairs. DeepSeek
+    // bills peak rates on weekdays 09:00-12:00 and 14:00-18:00; every other
+    // instant — nights, weekends and statutory holidays — is a valley rate.
+    peakWindows: Schema.array(Schema.array(Schema.number()))
+      .default([[9, 12], [14, 18]]),
+    // Peak price = valley price × this ratio (DeepSeek's official ratio is 2).
+    peakMultiplier: Schema.number().default(2),
+    // Per-model VALLEY prices, in `currency` per million tokens. Keys are
+    // matched exactly first, then as substrings (longest wins), so a partial
+    // family name is enough.
     models: Schema.dict(
       Schema.object({
-        inputPerM: Schema.number().default(2),
-        cacheHitPerM: Schema.number().default(0.5),
-        cacheWritePerM: Schema.number().default(2),
-        outputPerM: Schema.number().default(8),
+        inputPerM: Schema.number().default(1),
+        cacheHitPerM: Schema.number().default(0.02),
+        cacheWritePerM: Schema.number().default(1),
+        outputPerM: Schema.number().default(4),
       }),
       Schema.string(),
     ).default({}),
+    // Fallback for a model that neither `models` nor the built-in official
+    // table (see OFFICIAL_PRICES) knows about.
     defaultModel: Schema.object({
-      inputPerM: Schema.number().default(2),
-      cacheHitPerM: Schema.number().default(0.5),
-      cacheWritePerM: Schema.number().default(2),
-      outputPerM: Schema.number().default(8),
+      inputPerM: Schema.number().default(1),
+      cacheHitPerM: Schema.number().default(0.02),
+      cacheWritePerM: Schema.number().default(1),
+      outputPerM: Schema.number().default(4),
     }).default({}),
   }).default({}),
 });
@@ -337,32 +349,275 @@ function foldSession(session, config) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Cost model: configurable per-model price table with peak/valley     */
+/* Cost model: official price table + peak/valley schedule             */
 /* ------------------------------------------------------------------ */
 
-function priceOf(model, config) {
-  return config.pricing.models[model] ?? config.pricing.defaultModel;
+// Official DeepSeek CNY VALLEY prices per million tokens, as published on the
+// pricing page (the 2026-09-10 cut refreshed the Flash line). Peak rates are
+// valley × `pricing.peakMultiplier` — the published ratio is 2 — which is why
+// only the valley column is tabulated here.
+const OFFICIAL_PRICES = {
+  'deepseek-v4-pro': { inputPerM: 4.5, cacheHitPerM: 0.15, cacheWritePerM: 4.5, outputPerM: 13.5 },
+  'deepseek-v4-flash': { inputPerM: 1, cacheHitPerM: 0.02, cacheWritePerM: 1, outputPerM: 4 },
+  'deepseek-flash': { inputPerM: 1, cacheHitPerM: 0.02, cacheWritePerM: 1, outputPerM: 4 },
+};
+
+/** Longest-key substring match over a price table; `null` when nothing fits. */
+function matchPrice(table, id) {
+  let best = null;
+  let bestLength = 0;
+  for (const key of Object.keys(table)) {
+    if (key === '' || key.length <= bestLength) continue;
+    if (!id.includes(key.toLowerCase())) continue;
+    best = table[key];
+    bestLength = key.length;
+  }
+  return best;
 }
 
-function isOffPeak(timeMs, config) {
-  // DeepSeek peak/valley windows are Beijing time (UTC+8).
-  const cn = new Date(timeMs + 8 * 3600 * 1000);
-  const hour = cn.getUTCHours() + cn.getUTCMinutes() / 60;
-  return hour >= config.pricing.offPeakStartHour && hour < config.pricing.offPeakEndHour;
+/**
+ * Price entry for a model id: an exact entry in the user's table wins, then a
+ * substring match there, then the built-in official table, then the fallback.
+ * Substring matching exists because model ids drift between releases
+ * (`deepseek-v4-flash-vision-exp` is served by the Flash line), and longest
+ * first so `flash` can never swallow a longer, pricier id.
+ */
+function priceOf(model, config) {
+  const id = String(model ?? '').toLowerCase();
+  if (id !== '') {
+    const configured = config.pricing.models;
+    if (configured[id] !== undefined) return configured[id];
+    const override = matchPrice(configured, id);
+    if (override !== null) return override;
+    const official = matchPrice(OFFICIAL_PRICES, id);
+    if (official !== null) return official;
+  }
+  return config.pricing.defaultModel;
+}
+
+/* Official peak/valley schedule, in Beijing time (UTC+8): peak is weekdays
+   09:00-12:00 and 14:00-18:00, and every other instant — nights, weekends and
+   Chinese statutory holidays — is valley. This is the single source of truth
+   for BOTH the cost numbers and the panel's 峰/谷 indicator, so the two can
+   never disagree. */
+const BEIJING_OFFSET_MS = 8 * 3600 * 1000;
+const DAY_MS = 86400000;
+// Whole-day valley started on these Beijing instants; earlier timestamps are
+// priced by the plain weekday rule alone.
+const WEEKEND_VALLEY_FROM = Date.UTC(2026, 7, 22, 16, 0, 0); // = 2026-08-23 00:00 +08
+const HOLIDAY_VALLEY_FROM = Date.UTC(2026, 8, 18, 16, 0, 0); // = 2026-09-19 00:00 +08
+// Statutory holidays, 2026. Only days OFF are listed: every make-up working day
+// falls on a weekend, which the weekend rule already prices as valley.
+// NOTE: refresh this each November, when the State Council publishes the next
+// year's arrangement.
+const HOLIDAY_VALLEY = new Set([
+  '2026-01-01', '2026-01-02', '2026-01-03',
+  '2026-02-15', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19',
+  '2026-02-20', '2026-02-21', '2026-02-22', '2026-02-23',
+  '2026-04-04', '2026-04-05', '2026-04-06',
+  '2026-05-01', '2026-05-02', '2026-05-03', '2026-05-04', '2026-05-05',
+  '2026-06-19', '2026-06-20', '2026-06-21',
+  '2026-09-25', '2026-09-26', '2026-09-27',
+  '2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04',
+  '2026-10-05', '2026-10-06', '2026-10-07',
+]);
+// Beijing hour boundaries at which the peak state can flip.
+const PEAK_EDGE_HOURS = [0, 9, 12, 14, 18];
+
+/** Start of the Beijing calendar day containing `timeMs`, as epoch ms. */
+function beijingDayStart(timeMs) {
+  return Math.floor((timeMs + BEIJING_OFFSET_MS) / DAY_MS) * DAY_MS - BEIJING_OFFSET_MS;
+}
+
+/** `YYYY-MM-DD` of the Beijing calendar day containing `timeMs`. */
+function beijingDayKey(timeMs) {
+  return new Date(timeMs + BEIJING_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+/** Whether `timeMs` falls inside an official peak window. */
+function isPeakTime(timeMs, config) {
+  // Shifting by +8h and reading the UTC getters IS the Beijing calendar.
+  const bj = new Date(timeMs + BEIJING_OFFSET_MS);
+  if (timeMs >= WEEKEND_VALLEY_FROM) {
+    const dow = bj.getUTCDay();
+    if (dow === 0 || dow === 6) return false;
+  }
+  if (timeMs >= HOLIDAY_VALLEY_FROM && HOLIDAY_VALLEY.has(bj.toISOString().slice(0, 10))) return false;
+  const hour = bj.getUTCHours();
+  return config.pricing.peakWindows.some((w) => hour >= w[0] && hour < w[1]);
+}
+
+/**
+ * Epoch ms of the next peak↔valley flip at or after `timeMs`, or `null` when
+ * none happens within 12 days. Only Beijing hour boundaries can flip the state,
+ * so those are the only candidates scanned.
+ */
+function nextPeakChangeAt(timeMs, config) {
+  const current = isPeakTime(timeMs, config);
+  const day0 = beijingDayStart(timeMs);
+  // The longest holiday run is 9 days; 12 days leaves headroom.
+  for (let day = 0; day <= 12; day += 1) {
+    for (const hour of PEAK_EDGE_HOURS) {
+      const candidate = day0 + day * DAY_MS + hour * 3600000;
+      if (candidate <= timeMs + 1) continue;
+      if (isPeakTime(candidate, config) !== current) return candidate;
+    }
+  }
+  return null;
 }
 
 function priceRequest(record, config) {
   if (!config.pricing.enabled || record.kind !== 'usage' || !record.usage) return 0;
   const prices = priceOf(record.model ?? '', config);
-  const multiplier = isOffPeak(record.time, config)
-    ? config.pricing.offPeakMultiplier
-    : 1;
+  const multiplier = isPeakTime(record.time, config) ? config.pricing.peakMultiplier : 1;
   const u = record.usage;
   const perM = u.inputTokens * prices.inputPerM
     + u.cacheReadTokens * prices.cacheHitPerM
     + u.cacheWriteTokens * prices.cacheWritePerM
     + u.outputTokens * prices.outputPerM;
   return (multiplier * perM) / 1e6;
+}
+
+/**
+ * Price every billed message inside `[fromMs, toMs)` of ONE already-decoded
+ * event stream, with the same table and peak rule the per-session overview
+ * uses. `/usage-today` needs this because it reads COLD session logs, which
+ * `foldSession` cannot touch (it requires a live Session object).
+ *
+ * `request/header` events carry the route for the usage events that follow, so
+ * the whole stream is walked even when the window starts later.
+ */
+function scanUsage(events, config, fromMs, toMs) {
+  let cost = 0;
+  let requests = 0;
+  let model = 'unknown';
+  const byModel = new Map();
+  for (const event of events) {
+    if (event.type === 'request/header') {
+      const route = event.data?.header?.config ?? {};
+      model = typeof route.model === 'string' ? route.model : 'unknown';
+      continue;
+    }
+    if (event.type !== 'assistant/message') continue;
+    const usage = event.data?.usage;
+    if (!usage || typeof usage.inputTokens !== 'number') continue;
+    const time = eventTime(event);
+    if (time < fromMs || time >= toMs) continue;
+    const value = priceRequest({
+      kind: 'usage',
+      time,
+      model,
+      usage: {
+        inputTokens: usage.inputTokens,
+        cacheReadTokens: usage.cacheReadTokens ?? 0,
+        cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+        outputTokens: usage.outputTokens ?? 0,
+      },
+    }, config);
+    cost += value;
+    requests += 1;
+    byModel.set(model, (byModel.get(model) ?? 0) + value);
+  }
+  return { cost, requests, byModel };
+}
+
+// Cached result of the today-scan. Reading every session log touched today is
+// far too much work to repeat on each 15s poll, and today's total only moves
+// when a turn actually runs.
+const usageTodayCache = { day: null, at: 0, value: null };
+const USAGE_TODAY_TTL_MS = 60000;
+// A single session log above this size is skipped rather than decoded whole
+// into memory; `skipped` in the payload keeps that visible instead of silent.
+const MAX_USAGE_LOG_BYTES = 128 * 1024 * 1024;
+
+/**
+ * Cost of every session that logged a billed message today (Beijing calendar
+ * day), summed over ALL stored sessions — not just this process's live ones, so
+ * a restart does not reset the number.
+ *
+ * A log whose last write predates midnight cannot hold a record inside the
+ * window, so one `stat` per stored session filters 300+ logs down to the handful
+ * that can matter. Reading is done through the persistence service rather than
+ * by decoding files here: that keeps the on-disk log format (compression,
+ * generations, torn tails) entirely the backend's business.
+ */
+async function collectTodayUsage(persistence, config, now, logger) {
+  const dayStart = beijingDayStart(now);
+  if (usageTodayCache.value !== null
+    && usageTodayCache.day === dayStart
+    && now - usageTodayCache.at < USAGE_TODAY_TTL_MS) {
+    return usageTodayCache.value;
+  }
+  const stored = await persistence.list();
+  let cost = 0;
+  let requests = 0;
+  let sessions = 0;
+  let skipped = 0;
+  const byModel = new Map();
+  for (const snapshot of stored) {
+    const id = snapshot?.header?.id;
+    if (typeof id !== 'string' || id === '') continue;
+    if (typeof snapshot.sizeBytes === 'number' && snapshot.sizeBytes > MAX_USAGE_LOG_BYTES) {
+      skipped += 1;
+      continue;
+    }
+    let located = null;
+    if (typeof persistence.locate === 'function') {
+      try {
+        located = persistence.locate(snapshot.header);
+      } catch {
+        located = null;
+      }
+    }
+    if (located !== null && typeof located.path === 'string') {
+      try {
+        const info = await stat(located.path);
+        if (info.mtimeMs < dayStart) continue;
+      } catch {
+        // An unreadable stat is not a reason to skip a session.
+      }
+    }
+    let handle = null;
+    try {
+      handle = await persistence.open(id, 'read');
+      const slice = await handle.read(0);
+      const events = Array.isArray(slice?.events) ? slice.events : [];
+      const part = scanUsage(events, config, dayStart, now + 1);
+      if (part.requests === 0) continue;
+      sessions += 1;
+      cost += part.cost;
+      requests += part.requests;
+      for (const [model, value] of part.byModel) {
+        byModel.set(model, (byModel.get(model) ?? 0) + value);
+      }
+    } catch (error) {
+      skipped += 1;
+      logger?.warn?.(`[dsh-sidebar-panel] usage scan failed for ${id}: ${error.message}`);
+    } finally {
+      try {
+        await handle?.close();
+      } catch {
+        // Closing a read handle has nothing left to fail at.
+      }
+    }
+  }
+  const value = {
+    day: beijingDayKey(now),
+    dayStart,
+    cost: Number(cost.toFixed(6)),
+    currency: config.pricing.currency,
+    requests,
+    sessions,
+    skipped,
+    byModel: [...byModel.entries()].map(([model, amount]) => ({
+      model,
+      cost: Number(amount.toFixed(6)),
+    })),
+  };
+  usageTodayCache.day = dayStart;
+  usageTodayCache.at = now;
+  usageTodayCache.value = value;
+  return value;
 }
 
 /* ------------------------------------------------------------------ */
@@ -557,6 +812,50 @@ export function apply(ctx, config) {
             ok: true,
             balance: null,
             error: { code: 'NETWORK', message: error.message },
+          });
+        }
+        return;
+      }
+
+      if (request.method === 'GET' && route === '/usage-today') {
+        // "今日已用" + the official peak/valley state, both for the account
+        // card. The amount is summed over EVERY stored session that logged a
+        // billed message since Beijing midnight — other workspaces and
+        // pre-restart sessions included — priced exactly like /overview.
+        //
+        // It estimates THIS harness's spend, not the account's: the balance
+        // above also moves for usage from any other client, so the two numbers
+        // are deliberately not made to agree.
+        //
+        // The peak state is computed here, not in the browser, so the official
+        // schedule lives in exactly one place.
+        const now = Date.now();
+        const peak = {
+          active: isPeakTime(now, config),
+          nextChangeAt: nextPeakChangeAt(now, config),
+          multiplier: config.pricing.peakMultiplier,
+        };
+        const persistence = ctx.get('sessionPersistence');
+        if (!persistence || typeof persistence.list !== 'function' || typeof persistence.open !== 'function') {
+          sendJson(response, 200, {
+            ok: true,
+            currency: config.pricing.currency,
+            peak,
+            today: null,
+            error: { code: 'NO_SESSION_STORE', message: '会话存储服务不可用，无法统计今日用量' },
+          });
+          return;
+        }
+        try {
+          const today = await collectTodayUsage(persistence, config, now, ctx.logger);
+          sendJson(response, 200, { ok: true, currency: config.pricing.currency, peak, today });
+        } catch (error) {
+          sendJson(response, 200, {
+            ok: true,
+            currency: config.pricing.currency,
+            peak,
+            today: null,
+            error: { code: 'SCAN_FAILED', message: error.message },
           });
         }
         return;

@@ -9,7 +9,7 @@ DSH（DeepSeek Harness）**右侧栏的一个页签插件**：通过官方右栏
 面板自身包含四个页签：
 
 - **概览**
-  - **DeepSeek 账户**卡片——官方余额（经 `GET https://api.deepseek.com/user/balance` 实时查询，15 秒刷新）与**充值按钮**（跳转 https://platform.deepseek.com/usage）。
+  - **DeepSeek 账户**卡片——官方余额（经 `GET https://api.deepseek.com/user/balance` 实时查询，15 秒刷新）、**今日已用**（当日北京时间 00:00 起，跨全部已存会话的 token 计价估算）与**峰/谷时段指示**（按 DeepSeek 官方时段：工作日 09:00–12:00、14:00–18:00 为**峰**，夜间、周末与法定节假日为**谷**；峰红谷绿，并显示到下一次切换的倒计时），右上角为**充值按钮**（跳转 https://platform.deepseek.com/usage）。
   - 上下文窗口（已用/总量/百分比/距压缩）、本轮上下文预算（提示词/输出预算/物理剩余空间/上限来源）、会话指标（命中率/**本次会话费用**/运行时间/请求数/累计 tokens）、用量分析（按来源/按类型，含输入输出、命中未命中明细）。服务端数据每 5 秒自动刷新（右上角显示"更新于 HH:MM:SS"），投影数据（token/上下文）实时响应。
 - **文件**：当前会话工作区的文件树。文件与文件夹按类型显示各自的图标（彩色字母章 + 内联 SVG 轮廓：图片 / 压缩包 / 字体 / 锁文件 / 配置 / 脚本等各有其形，未收录的扩展名回退为中性字母章），图形全部由 CSS 与内联 SVG 绘制，不依赖图标字体或图片资源。**单击文件预览**（md/txt/代码等文本内联显示，PDF 与图片内嵌预览，大文件截断提示）；**右键菜单**：在文件管理器中显示、添加文件引用 / 添加文件内容（文件）、添加文件夹引用（文件夹）、复制绝对路径 / 复制相对路径。插入内容会写入对话输入框。
 - **改动**：本次会话中写文件类工具（write/edit/str-replace-editor 等）触碰过的文件列表。
@@ -46,15 +46,14 @@ dsh plugin --profile desktop add github:kee0012/dsh-sidebar-panel
     pricing:
       enabled: true
       currency: CNY
-      offPeakStartHour: 0.5      # 北京时间 00:30 起为低谷
-      offPeakEndHour: 8.5        # 08:30 止
-      offPeakMultiplier: 0.5
-      models:
-        deepseek-chat: { inputPerM: 2, cacheHitPerM: 0.5, cacheWritePerM: 2, outputPerM: 8 }
-        deepseek-reasoner: { inputPerM: 4, cacheHitPerM: 1, cacheWritePerM: 4, outputPerM: 16 }
+      peakWindows: [[9, 12], [14, 18]]   # 北京时间峰段（官方时段）
+      peakMultiplier: 2                  # 峰价 = 谷价 × 2（官方倍率）
+      models:                            # 未列出则回退官方价表
+        deepseek-v4-pro: { inputPerM: 4.5, cacheHitPerM: 0.15, cacheWritePerM: 4.5, outputPerM: 13.5 }
+      defaultModel: { inputPerM: 1, cacheHitPerM: 0.02, cacheWritePerM: 1, outputPerM: 4 }
 ```
 
-> 费用为**估算**：按每次请求的 usage × 每百万 tokens 单价（缓存命中按低价），并按请求时刻的北京时间峰/谷时段加权。你的模型若不在表中则用 `pricing.defaultModel`（默认与 deepseek-chat 相同）。如需精确匹配实际账单，请按你的模型实际价格调整 `pricing.models`。
+> `models` 里填**谷价**（CNY / 百万 tokens），峰段按 `peakMultiplier` 放大。留空即使用内置的官方价表（`deepseek-v4-pro` / `deepseek-v4-flash` / `deepseek-flash`，前缀匹配，形如 `deepseek-v4-pro-2026` 也能命中）。峰谷判定按**北京时间**：工作日 09:00–12:00 与 14:00–18:00 为峰，其余时段、周末以及 2026 年法定节假日（元旦/春节/清明/劳动节/端午/中秋/国庆）全天为谷。
 
 ## 服务端 API（同源，供客户端面板使用）
 
@@ -66,6 +65,7 @@ dsh plugin --profile desktop add github:kee0012/dsh-sidebar-panel
 | `POST /dsh-sidebar-panel/api/file-content` | 读取文件内容（截断上限可配置） |
 | `GET /dsh-sidebar-panel/api/file-raw?root=&path=` | 原始字节预览（PDF/图片，content-type 白名单） |
 | `GET /dsh-sidebar-panel/api/balance` | DeepSeek 官方余额（`user/balance`，key 来自 DSH 凭据，永不下发浏览器） |
+| `GET /dsh-sidebar-panel/api/usage-today` | 今日已用（跨全部已存会话的 token 计价）+ 官方峰/谷状态与下次切换时刻 |
 | `POST /dsh-sidebar-panel/api/reveal` | 在文件管理器中显示（win32/darwin/linux 分发） |
 | `GET /dsh-sidebar-panel/api/changes?sessionId=` | 本次会话写文件类工具改动列表 |
 
@@ -118,6 +118,7 @@ curl -H "Origin: http://127.0.0.1:<port>" -H "Content-Type: application/json" -X
 - **改动追踪**：只覆盖写文件类工具调用；bash/pwsh 内部的文件改动无法可靠捕获。
 - **概览请求数/费用/运行时间**：由服务端从会话事件日志折叠（`request/header`、`assistant/message` 的 usage），插件安装前的历史会话在首次访问时会一次性补算；运行时间 = 自首次请求至今（含空闲）。
 - **账户数据口径**：**余额**来自 DeepSeek 官方接口（需在 DSH 凭据/环境变量中配置 `DEEPSEEK_API_KEY`，否则显示"未配置"提示）。官方仅提供余额查询接口，无公开的累计消费/请求次数接口，故账户卡片不展示这两项；精确账单可通过"充值"按钮进入 https://platform.deepseek.com/usage 查看。
+- **今日已用是估算**：官方没有"当日消费"接口，故这一项由插件自行统计——从**全部已存会话**的日志里折出当日（北京时间 00:00 起）每条 `assistant/message` 的 usage，按官方价表 × 峰谷倍率累加。它反映的是"按 token 计价"，与按余额差值观测或最终账单可能有差异；读不到会话日志时该行显示 `—` 并在悬停提示里说明原因，不会影响余额显示。
 - **跨域防护**：每个请求都要求 `Host` 是环回名（`127.0.0.1` / `localhost` / `::1`），并拒绝 `Sec-Fetch-Site: cross-site`；带 `Origin` 时必须也是环回，以防止 **DNS rebinding**。同源 GET 不带 `Origin` 头，照常放行；POST 另有「不响应 CORS 预检 + 仅接受 JSON」防线（与 DSH 宿主 API 同策略）。
 
 ## 反馈与贡献
