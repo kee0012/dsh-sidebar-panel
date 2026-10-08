@@ -82,7 +82,6 @@ dsh-sidebar-panel/
 ├── test/unit.test.mjs       # server unit tests (mocked ctx, no DSH instance)
 ├── test/smoke.client.mjs    # client smoke: stub runtime asserting registration shape / navigation / chat slice
 ├── tsconfig.json            # editor / type hints only (noEmit; the build never calls tsc)
-├── docs/plan.md             # plugin plan and decision log
 ├── SECURITY.md              # credential and network-surface notes
 └── README.md / README_EN.md
 ```

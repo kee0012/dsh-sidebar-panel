@@ -84,7 +84,6 @@ dsh-sidebar-panel/
 ├── test/unit.test.mjs       # 服务端单元测试（mock ctx，无需 DSH 实例）
 ├── test/smoke.client.mjs    # 客户端冒烟：桩运行时断言注册形状 / 导航行为 / chat 切片
 ├── tsconfig.json            # 仅编辑器 / 类型提示用（noEmit，构建流程不调用 tsc）
-├── docs/plan.md             # 插件计划与决策记录
 ├── SECURITY.md              # 凭据与网络面说明
 └── README.md / README_EN.md
 ```
