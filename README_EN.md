@@ -22,7 +22,6 @@ The plugin is hosted on GitHub (`kee0012/dsh-sidebar-panel`, not published to np
 dsh plugin --profile desktop add github:kee0012/dsh-sidebar-panel
 ```
 
-> Replace `--profile` with the profile you actually use (`desktop` / `web`); the plugin's four tabs work in both the desktop app and `dsh web`. To pin a version, append `#<tag>` to the repository (for example `github:kee0012/dsh-sidebar-panel#v0.4.0`).
 > DSH must be **restarted** after installation so the new server code and client bundle take effect.
 
 ## Configuration (cordis.yml / plugin config)

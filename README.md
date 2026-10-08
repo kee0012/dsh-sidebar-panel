@@ -24,7 +24,6 @@ DSH（DeepSeek Harness）**右侧栏的一个页签插件**：通过官方右栏
 dsh plugin --profile desktop add github:kee0012/dsh-sidebar-panel
 ```
 
-> `--profile` 换成你实际使用的 profile（`desktop` / `web`）；本插件的四个页签在桌面版与 `dsh web` 下都可用。如需固定某个版本，可在仓库后追加 `#<tag>`（例如 `github:kee0012/dsh-sidebar-panel#v0.4.0`）。
 > 安装后需要**重启 DSH**，新的服务端代码与 client bundle 才会生效。
 
 ## 配置（cordis.yml / 插件配置）
