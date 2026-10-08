@@ -9,7 +9,8 @@ import os from 'node:os';
 import fs from 'node:fs/promises';
 import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { apply, Config, name, inject } from '../src/index.js';
+import { zstdCompressSync } from 'node:zlib';
+import { apply, Config, name, inject, __test } from '../src/index.js';
 
 // Portable root for file-browser fixtures: the plugin's own directory
 // (contains src/, client/, package.json …). No machine-specific paths.
@@ -23,6 +24,7 @@ function makeCtx() {
   const routes = [];
   const listeners = {};
   const sessions = new Map();
+  const cleanups = [];
   const ctx = {
     webServer: {
       register(route) {
@@ -34,7 +36,12 @@ function makeCtx() {
       listeners[event] = fn;
     },
     effect(fn) {
-      return fn();
+      // Effects run eagerly here, exactly like the real host at load time — but
+      // the returned disposer must be kept: the plugin registers a real
+      // interval for the background usage scan, and nothing else would clear it.
+      const cleanup = fn();
+      if (typeof cleanup === 'function') cleanups.push(cleanup);
+      return cleanup;
     },
     logger: { warn() {}, error() {} },
     sessions: {
@@ -44,14 +51,13 @@ function makeCtx() {
     },
     get(name) {
       if (name === 'credentials') return ctx._credentials;
-      if (name === 'sessionPersistence') return ctx._persistence;
       return undefined;
     },
     _routes: routes,
     _listeners: listeners,
     _sessions: sessions,
+    _cleanups: cleanups,
     _credentials: undefined,
-    _persistence: undefined,
   };
   return ctx;
 }
@@ -111,7 +117,13 @@ const parse = (res) => JSON.parse(res.body);
 /* ------------------------------------------------------------------ */
 
 const ctx = makeCtx();
-const config = Config({}); // validated defaults
+// The usage scan owns its own corpus: point it at an empty temp root (so a run
+// never touches the machine's real session logs) and push the background timers
+// far out of reach — every test drives a scan explicitly instead of racing one.
+const SESSIONS_ROOT = await fs.mkdtemp(path.join(os.tmpdir(), 'dsp-sessions-'));
+const config = Config({
+  usage: { sessionsRoot: SESSIONS_ROOT, warmupDelayMs: 3_600_000, intervalMs: 3_600_000 },
+});
 apply(ctx, config);
 const handler = ctx._routes[0].handler;
 
@@ -620,36 +632,41 @@ function usageEvents(model, time, inputTokens) {
   ];
 }
 
-/** A fake persistence backend over a map of id → { path, events }. */
-function fakePersistence(entries) {
-  const store = new Map(entries);
-  return {
-    store,
-    async list() {
-      return [...store.entries()].map(([id, entry]) => ({
-        header: { id, cwd: 'D:/ws' },
-        revision: 1,
-        sizeBytes: entry.events.length * 512,
-      }));
-    },
-    locate(header) {
-      return { kind: 'jsonl', path: store.get(header.id).path };
-    },
-    async open(id) {
-      const entry = store.get(id);
-      return {
-        header: { id, cwd: 'D:/ws' },
-        async read() {
-          return { eventState: 'current', events: entry.events };
-        },
-        async close() {},
-      };
-    },
-  };
+/**
+ * Write a session log the way the host does: a zstd stream holding one frame per
+ * recorded batch. Decoding every frame (not only the first) is the plugin's job.
+ */
+async function writeSessionLog(project, id, fileName, batches) {
+  const dir = path.join(SESSIONS_ROOT, project, id);
+  await fs.mkdir(dir, { recursive: true });
+  const frames = batches.map((events) =>
+    zstdCompressSync(Buffer.from(events.map((event) => JSON.stringify(event)).join('\n') + '\n', 'utf8')));
+  const file = path.join(dir, fileName);
+  await fs.writeFile(file, Buffer.concat(frames));
+  return file;
 }
 
-// 12. The schedule itself, read off the route (no store needed: `peak` is
-// computed before the scan, so these assertions never touch a session log).
+/** Drop the warm snapshot and drain any scan in flight, so a test owns the next one. */
+async function resetUsage() {
+  await __test.usageSnapshot.running;
+  __test.usageSnapshot.value = null;
+  __test.usageSnapshot.day = null;
+  __test.usageSnapshot.computedAt = 0;
+  __test.usageSnapshot.error = null;
+  __test.usageSnapshot.running = null;
+}
+
+/** GET /usage-today at a stubbed instant, returning the parsed body. */
+async function usageToday(instant) {
+  atInstant(instant);
+  const res = makeRes();
+  await handler(makeReq('GET', '/dsh-sidebar-panel/api/usage-today', OK_HEADERS), res);
+  restoreNow();
+  return parse(res);
+}
+
+// 12. The schedule itself is pure clock arithmetic, answered from the request
+// alone: the indicator stays correct even while the numbers behind it warm up.
 {
   const cases = [
     // [instant, peak?, next flip, why]
@@ -660,57 +677,77 @@ function fakePersistence(entries) {
     [BJ(2026, 10, 10, 10), false, BJ(2026, 10, 12, 9), 'Saturday is valley all day'],
     [BJ(2026, 10, 1, 10), false, BJ(2026, 10, 8, 9), 'National Day holiday is valley all day'],
   ];
-  ctx._persistence = undefined;
   for (const [instant, expectedPeak, expectedNext, why] of cases) {
-    atInstant(instant);
-    const res = makeRes();
-    await handler(makeReq('GET', '/dsh-sidebar-panel/api/usage-today', OK_HEADERS), res);
-    const data = parse(res);
-    restoreNow();
+    await resetUsage();
+    const data = await usageToday(instant);
     assert.equal(data.peak.active, expectedPeak, why);
     assert.equal(data.peak.nextChangeAt, expectedNext, `next flip after: ${why}`);
-    // No store is the documented degradation: the indicator still works.
-    assert.equal(data.today, null);
-    assert.equal(data.error.code, 'NO_SESSION_STORE');
   }
   console.log('✓ official peak/valley schedule (weekday windows, weekends, holidays)');
 }
 
-// 13. Today's spend: peak and valley priced from the official table, and a log
-// untouched since midnight skipped without being decoded.
+// 12b. A cold card never waits: the first request answers immediately with
+// `warming`, and the very next one — once the background scan has landed — has
+// the numbers. This is the regression test for the route that used to scan
+// inline and never answer at all.
+{
+  await resetUsage();
+  const cold = await usageToday(BJ(2026, 10, 8, 10));
+  assert.equal(cold.ok, true);
+  assert.equal(cold.warming, true, 'a cold request hands the work to the warmer');
+  assert.equal(cold.today, null);
+  assert.equal(cold.error, null);
+  await __test.usageSnapshot.running; // the scan the request kicked off
+  const warm = await usageToday(BJ(2026, 10, 8, 10));
+  assert.equal(warm.warming, false);
+  assert.equal(warm.today.day, '2026-10-08');
+  assert.equal(warm.today.cost, 0, 'an empty corpus is a zero-cost day, not an error');
+  assert.equal(warm.today.sessions, 0);
+  console.log('✓ a cold request answers at once; the background scan fills the snapshot');
+}
+
+// 13. Today's spend read straight off the stored logs: peak and valley priced
+// from the official table, both zstd frames decoded (a batch per frame), a log
+// untouched since midnight skipped before decode, and the legacy generation in
+// the same directory passed over in favour of session.v4.
 {
   const day = Date.UTC(2026, 9, 8, 12); // 2026-10-08 20:00 +08
   const dayStart = Date.UTC(2026, 9, 7, 16); // 2026-10-08 00:00 +08
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsp-usage-'));
-  const freshPath = path.join(dir, 'fresh.jsonl');
-  const stalePath = path.join(dir, 'stale.jsonl');
-  await fs.writeFile(freshPath, '');
-  await fs.writeFile(stalePath, '');
-  await fs.utimes(freshPath, new Date(day), new Date(day));
-  await fs.utimes(stalePath, new Date(dayStart - 86400000), new Date(dayStart - 86400000));
+  const project = '--D-DSH-workspace--';
 
-  // Flash valley = 1 CNY/M input, peak = ×2. 10:00 +08 is peak, 13:00 is valley.
-  const fresh = [
-    ...usageEvents('deepseek-v4-flash', Date.UTC(2026, 9, 8, 2), 1000000),
-    ...usageEvents('deepseek-v4-flash', Date.UTC(2026, 9, 8, 5), 1000000),
-  ];
-  const stale = usageEvents('deepseek-v4-flash', Date.UTC(2026, 9, 8, 5), 1000000);
-  ctx._persistence = fakePersistence([['sess-fresh', { path: freshPath, events: fresh }], ['sess-stale', { path: stalePath, events: stale }]]);
+  // Flash valley = 1 CNY/M input, peak = ×2. 02:00Z is 10:00 +08 (peak), 05:00Z
+  // is 13:00 +08 (valley) — the two batches are two separate zstd frames.
+  const fresh = await writeSessionLog(project, 'sess-fresh', 'session.v4.jsonl.zstd', [
+    usageEvents('deepseek-v4-flash', Date.UTC(2026, 9, 8, 2), 1000000),
+    usageEvents('deepseek-v4-flash', Date.UTC(2026, 9, 8, 5), 1000000),
+  ]);
+  // A legacy generation beside it that must never be counted.
+  await writeSessionLog(project, 'sess-fresh', 'session.v2.jsonl.zstd', [
+    usageEvents('deepseek-v4-pro', Date.UTC(2026, 9, 8, 5), 50000000),
+  ]);
+  const stale = await writeSessionLog(project, 'sess-stale', 'session.v4.jsonl.zstd', [
+    usageEvents('deepseek-v4-flash', Date.UTC(2026, 9, 8, 5), 1000000),
+  ]);
+  await fs.utimes(fresh, new Date(day), new Date(day));
+  await fs.utimes(stale, new Date(dayStart - 86400000), new Date(dayStart - 86400000));
 
-  atInstant(day);
-  const res = makeRes();
-  await handler(makeReq('GET', '/dsh-sidebar-panel/api/usage-today', OK_HEADERS), res);
-  restoreNow();
-  const data = parse(res);
+  await resetUsage();
+  const today = await __test.warmUsage(config, ctx.logger, day);
+  assert.equal(today.day, '2026-10-08');
+  assert.equal(today.requests, 2, 'one billed message per usage event, across both frames');
+  assert.equal(today.sessions, 1, 'the untouched log is filtered out before decode');
+  assert.equal(today.skipped, 0);
+  assert.equal(today.scanned, 1, 'only the v4 generation is selected — the v2 file beside it is not');
+  assert.equal(today.cost, 3, '2 (peak) + 1 (valley) CNY');
+  assert.equal(today.currency, 'CNY');
+  assert.equal(today.byModel[0].model, 'deepseek-v4-flash');
+
+  // The route serves that snapshot without reading anything itself.
+  const data = await usageToday(day);
   assert.equal(data.ok, true);
-  assert.equal(data.today.day, '2026-10-08');
-  assert.equal(data.today.requests, 2, 'one billed message per usage event');
-  assert.equal(data.today.sessions, 1, 'the untouched log is filtered out before decode');
-  assert.equal(data.today.skipped, 0);
-  assert.equal(data.today.cost, 3, '2 (peak) + 1 (valley) CNY');
-  assert.equal(data.today.currency, 'CNY');
+  assert.equal(data.warming, false);
+  assert.equal(data.today.cost, 3);
   assert.equal(data.peak.active, false, '20:00 Beijing is valley');
-  assert.equal(data.today.byModel[0].model, 'deepseek-v4-flash');
   console.log("✓ /usage-today prices today's peak+valley usage and skips stale logs");
 }
 
@@ -718,22 +755,19 @@ function fakePersistence(entries) {
 // matched by substring, so a variant id still lands on the right row.
 {
   const day = Date.UTC(2026, 9, 9, 12); // 2026-10-09 20:00 +08
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsp-usage-pro-'));
-  const logPath = path.join(dir, 'pro.jsonl');
-  await fs.writeFile(logPath, '');
-  await fs.utimes(logPath, new Date(day), new Date(day));
-  ctx._persistence = fakePersistence([['sess-pro', {
-    path: logPath,
-    events: usageEvents('deepseek-v4-pro-2026', Date.UTC(2026, 9, 9, 5), 1000000),
-  }]]);
+  const file = await writeSessionLog('--D-DSH-pro--', 'sess-pro', 'session.v4.jsonl.zstd', [
+    usageEvents('deepseek-v4-pro-2026', Date.UTC(2026, 9, 9, 5), 1000000),
+  ]);
+  await fs.utimes(file, new Date(day), new Date(day));
 
-  atInstant(day);
-  const res = makeRes();
-  await handler(makeReq('GET', '/dsh-sidebar-panel/api/usage-today', OK_HEADERS), res);
-  restoreNow();
-  const data = parse(res);
-  assert.equal(data.today.cost, 4.5, 'Pro valley input price is 4.5 CNY/M');
+  await resetUsage();
+  const today = await __test.warmUsage(config, ctx.logger, day);
+  assert.equal(today.cost, 4.5, 'Pro valley input price is 4.5 CNY/M');
   console.log('✓ /usage-today resolves the built-in official table by model id substring');
 }
+
+// The plugin registers a real interval for the background scan; dispose it or the
+// test process would never exit.
+for (const cleanup of ctx._cleanups.reverse()) cleanup();
 
 console.log('\nALL UNIT TESTS PASSED');

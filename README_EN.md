@@ -7,7 +7,7 @@ A **right-column tab plugin** for DSH (DeepSeek Harness). It registers a page ty
 The panel itself has four tabs:
 
 - **Overview**
-  - a **DeepSeek account** card — official balance (fetched live from `GET https://api.deepseek.com/user/balance`, refreshed every 15 s), **used today** (estimated from token usage since Beijing midnight across every stored session) and a **peak/valley indicator** (official schedule: weekdays 09:00–12:00 and 14:00–18:00 Beijing time are peak; nights, weekends and statutory holidays are valley — peak in red, valley in green, with a countdown to the next switch), plus a **Top Up** button (https://platform.deepseek.com/usage).
+  - a **DeepSeek account** card — official balance (fetched live from `GET https://api.deepseek.com/user/balance`, refreshed every 15 s), **used today** (estimated from token usage since Beijing midnight, totalled by a background scan of this machine's session logs) and a **peak/valley indicator** (official schedule: weekdays 09:00–12:00 and 14:00–18:00 Beijing time are peak; nights, weekends and statutory holidays are valley — peak in red, valley in green, with a countdown to the next switch), plus a **Top Up** button (https://platform.deepseek.com/usage). Switching to the Overview tab paints immediately (the previous answer is restored, then refreshed in the background); while the server's first scan is still running the amount reads "Counting…" and fills in on its own.
   - context window (used/total/percent/distance-to-compaction), current turn's context budget (prompt/output budget, physical headroom, output-cap source), session metrics (hit rate / **session cost** / runtime / request count / total tokens), and usage analysis (by source / by type, with input-output and cache hit-miss breakdown). Server-side data refreshes every 5 s ("updated at HH:MM:SS" in the corner); projected data (tokens/context) reacts in real time.
 - **Files**: a file tree of the current session's workspace. Files and folders carry per-type icons (colored letter chips plus inline SVG outlines — images, archives, fonts, lockfiles, configs and scripts each have their own shape; extensions outside the table fall back to a neutral chip), drawn entirely with CSS and inline SVG: no icon font, no image assets. **Click a file to preview** (md/txt/code inline; PDF and images embedded; truncation notice for large files). **Right-click menu**: reveal in file manager, add file reference / add file content (file), add folder reference (folder), copy absolute path / copy relative path. Inserted content is written into the chat input box.
 - **Changes**: files touched by write-like tools (write/edit/str-replace-editor, …) in the current session.
@@ -49,9 +49,16 @@ Add a `config` block to the plugin entry in the DSH composition config (all defa
       models:                            # anything unlisted falls back to the official table
         deepseek-v4-pro: { inputPerM: 4.5, cacheHitPerM: 0.15, cacheWritePerM: 4.5, outputPerM: 13.5 }
       defaultModel: { inputPerM: 1, cacheHitPerM: 0.02, cacheWritePerM: 1, outputPerM: 4 }
+    usage:                               # background scan of the local session logs
+      intervalMs: 30000                  # rescan cadence; a request never waits on one
+      warmupDelayMs: 3000                # delay before the first scan after start-up
+      maxLogBytes: 134217728             # per-log decode cap (larger logs count as skipped)
+      sessionsRoot: ''                   # empty = <DSH_HOME>/sessions, follows the data root
 ```
 
 > `models` entries are **valley** prices (CNY per million tokens); peak windows scale them by `peakMultiplier`. Leave it empty to use the built-in official table (`deepseek-v4-pro` / `deepseek-v4-flash` / `deepseek-flash`, prefix-matched, so ids like `deepseek-v4-pro-2026` resolve too). Peak/valley is decided in **Beijing time**: weekdays 09:00–12:00 and 14:00–18:00 are peak; every other hour, weekends, and the 2026 statutory holidays (New Year / Spring Festival / Qingming / Labour Day / Dragon Boat / Mid-Autumn / National Day) are valley all day.
+
+> `usage` drives the **used today** scanner: one scan `warmupDelayMs` after start-up, then every `intervalMs`, with the result held in a memory snapshot. `GET /usage-today` only reads that snapshot and **never waits** for a scan — a cold snapshot answers `warming: true`, the card shows "Counting…" and re-asks 1.2 s later. The scanner reads the session logs directly (`<sessionsRoot>/<project>/<session id>/session.v4.jsonl.zstd`), fully decoupled from the host's session store — which is what lets it answer in a few hundred milliseconds.
 
 > Cost is an **estimate**: per-request usage × price per million tokens (cache hits at the discounted rate), weighted by the Beijing-time peak/valley state of the request. Models absent from the table fall back to `pricing.defaultModel`. Adjust `pricing.models` to match your actual prices for exact bill matching.
 
@@ -65,7 +72,7 @@ Add a `config` block to the plugin entry in the DSH composition config (all defa
 | `POST /dsh-sidebar-panel/api/file-content` | read a file (configurable truncation cap) |
 | `GET /dsh-sidebar-panel/api/file-raw?root=&path=` | raw bytes preview (PDF/images, content-type whitelist) |
 | `GET /dsh-sidebar-panel/api/balance` | official DeepSeek balance (`user/balance`; key from DSH credentials, never sent to the browser) |
-| `GET /dsh-sidebar-panel/api/usage-today` | used today (token-priced across every stored session) + official peak/valley state and next switch |
+| `GET /dsh-sidebar-panel/api/usage-today` | used today (read from the warm snapshot, never blocking) + official peak/valley state and next switch |
 | `POST /dsh-sidebar-panel/api/reveal` | reveal in OS file manager (win32/darwin/linux) |
 | `GET /dsh-sidebar-panel/api/changes?sessionId=` | files written by tools this session |
 
@@ -119,7 +126,7 @@ curl -H "Origin: http://127.0.0.1:<port>" -H "Content-Type: application/json" -X
 - **Change tracking**: covers write-file-like tool calls only; file changes made inside bash/pwsh cannot be captured reliably.
 - **Overview counts**: request count/cost/runtime are folded server-side from the session event log (`request/header`, `assistant/message` usage). Pre-plugin history sessions are back-filled on first access; runtime = time since the first request (includes idle time).
 - **Account data**: **balance** comes from the official DeepSeek endpoint (requires `DEEPSEEK_API_KEY` in DSH credentials/env, otherwise a "not configured" hint is shown). The official API exposes no public cumulative-spend/request-count endpoint, so the account card omits those; exact billing is available via the Top Up button at https://platform.deepseek.com/usage.
-- **"Used today" is an estimate**: the official API has no per-day spend endpoint, so the plugin totals it itself — it folds every stored session log for `assistant/message` usage since Beijing midnight and prices it with the official table × the peak/valley multiplier. That is a token-based figure and can differ from a balance-delta observation or the final invoice; when session logs are unavailable the row shows `—` with the reason in its tooltip, and the balance is unaffected.
+- **"Used today" is an estimate**: the official API has no per-day spend endpoint, so the plugin totals it itself — a background scan folds each `assistant/message` usage since Beijing midnight out of the local session logs and prices it with the official table × the peak/valley multiplier. It reads only logs modified today and only the **newest generation** per session (`session.v4` over an older `session.v2`). That is a token-based figure and can differ from a balance-delta observation or the final invoice. Scanning happens off the request path (at start-up and every 30 s), so the card always answers instantly; if the log directory is missing the row shows `¥0.00` with the reason in its tooltip, and the balance is unaffected.
 - **Cross-origin fence**: every request requires `Host` to be a loopback name (`127.0.0.1` / `localhost` / `::1`) and rejects `Sec-Fetch-Site: cross-site` outright; a present `Origin` must be loopback too, which closes the **DNS rebinding** hole. Same-origin GETs carry no `Origin` header and are still let through; POSTs additionally rely on "never answer CORS preflights + JSON-only bodies" (same policy as the DSH host API).
 
 ## Feedback & contributing
