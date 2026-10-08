@@ -30,8 +30,10 @@
  *     `toggleExpanded`); it never drives layout itself.
  *
  * The panel has four tabs: 概览 (context/token/cost), 文件 (workspace file tree
- * + context menu), 改动 (files written this session), 工具 (tool calls in this
- * window).
+ * with a per-type icon per row + context menu), 改动 (files written this
+ * session, drawn with the same icons), 工具 (tool calls in this window, one
+ * glyph per state). Every icon is inline SVG or a CSS chip built by this file —
+ * no icon font, no image asset, nothing to load.
  *
  * Persistence: which tabs exist and whether the column shows them is
  * per-session store state owned by the shipped Sidebar, so switching sessions
@@ -541,6 +543,284 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
   }
 
   /**
+   * Last path segment of a session-reported path (the 改动 tab reports full
+   * paths, the 文件 tab reports names).
+   */
+  function baseName(p) {
+    var text = String(p === null || p === undefined ? "" : p);
+    var i = Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\"));
+    return i < 0 ? text : text.slice(i + 1);
+  }
+
+  /* File-type icons ----------------------------------------------------- */
+
+  /**
+   * The file tree draws a per-type icon instead of one generic page for every
+   * row: a lettered chip for the languages and data formats a workspace is
+   * mostly made of (the yellow `JS` square is the familiar one), and a drawn
+   * glyph for the families a letter cannot express (folder, image, archive,
+   * configuration, lock, font). An extension nobody mapped still gets a chip
+   * built from its own letters, so two rows only share an icon when they really
+   * are the same kind of file.
+   *
+   * Chip palette, `[label, background, foreground]`. Labels stay at three
+   * characters or fewer because a chip is 16px wide; the foreground is the one
+   * that contrasts with its own background rather than a theme token, since the
+   * chip is a colour swatch and must read the same in light and dark.
+   */
+  var FILE_CHIPS = {
+    js: ["JS", "#e9c849", "#1b1b1b"],
+    ts: ["TS", "#3178c6", "#ffffff"],
+    py: ["PY", "#3c7fb0", "#ffffff"],
+    rs: ["RS", "#c4703f", "#ffffff"],
+    go: ["GO", "#2ba6c4", "#ffffff"],
+    rb: ["RB", "#c0392b", "#ffffff"],
+    php: ["PHP", "#6b76c4", "#ffffff"],
+    java: ["JAV", "#c0392b", "#ffffff"],
+    kt: ["KT", "#9b59d0", "#ffffff"],
+    swift: ["SW", "#e0713a", "#ffffff"],
+    dart: ["DA", "#2ba0c4", "#ffffff"],
+    lua: ["LUA", "#2f4bc0", "#ffffff"],
+    r: ["R", "#2b6cb0", "#ffffff"],
+    pl: ["PL", "#3b6ea8", "#ffffff"],
+    cs: ["C#", "#7a3fa8", "#ffffff"],
+    c: ["C", "#5a86c4", "#ffffff"],
+    cpp: ["C++", "#4b7bb5", "#ffffff"],
+    h: ["H", "#5a86c4", "#ffffff"],
+    html: ["<>", "#e06c3a", "#ffffff"],
+    css: ["CSS", "#3b7fc4", "#ffffff"],
+    vue: ["V", "#41b883", "#ffffff"],
+    svelte: ["S", "#e04a2f", "#ffffff"],
+    sql: ["SQL", "#d4763a", "#ffffff"],
+    json: ["{}", "#d6a13a", "#1b1b1b"],
+    yml: ["YML", "#8a6ec4", "#ffffff"],
+    toml: ["TML", "#9a6b4a", "#ffffff"],
+    xml: ["XML", "#8a9a4a", "#ffffff"],
+    md: ["MD", "#4a7fbd", "#ffffff"],
+    txt: ["TXT", "#8a8f98", "#ffffff"],
+    csv: ["CSV", "#3f9a5a", "#ffffff"],
+    sh: ["SH", "#4a9a4a", "#ffffff"],
+    ps: ["PS", "#2f6fb5", "#ffffff"],
+    bat: ["BAT", "#6a7f8f", "#ffffff"],
+    env: ["ENV", "#b5a13a", "#1b1b1b"],
+    patch: ["DF", "#5f9a5f", "#ffffff"],
+    pdf: ["PDF", "#c0392b", "#ffffff"],
+  };
+
+  /** Aliases folded onto a chip above, so one entry covers a whole family. */
+  var FILE_CHIP_ALIASES = {
+    jsx: "js", mjs: "js", cjs: "js",
+    tsx: "ts", mts: "ts", cts: "ts",
+    pyw: "py", pyi: "py",
+    rbw: "rb",
+    kts: "kt",
+    htm: "html", xhtml: "html",
+    scss: "css", sass: "css", less: "css", styl: "css",
+    markdown: "md", mdx: "md",
+    yaml: "yml",
+    text: "txt", log: "txt",
+    tsv: "csv",
+    jsonc: "json", json5: "json", jsonl: "json",
+    cxx: "cpp", cc: "cpp", hpp: "cpp", hh: "cpp", hxx: "cpp", "c++": "cpp",
+    bash: "sh", zsh: "sh", ksh: "sh", fish: "sh",
+    ps1: "ps", psm1: "ps",
+    cmd: "bat",
+    diff: "patch",
+  };
+
+  /**
+   * Extension families that read better drawn than lettered. Keys are glyph
+   * names, values are space-separated extensions.
+   */
+  var FILE_GLYPH_EXTS = {
+    image: "png jpg jpeg jpe gif webp bmp ico icns avif tif tiff heic svg",
+    archive: "zip tar gz tgz bz2 xz 7z rar jar war whl egg",
+    config: "ini cfg conf config properties editorconfig rc",
+    lock: "lock",
+    font: "ttf otf woff woff2 eot",
+  };
+
+  /**
+   * Drawn glyphs: `[tag, attributes]` children of a 16x16 outline. Outline
+   * rather than fill, so the tree speaks the same icon language as the host's
+   * own primitives (`Icon…Outline16`). Geometry is deliberately simple —
+   * rectangles, circles and straight paths — so it stays legible at 16px.
+   */
+  var FILE_GLYPHS = {
+    folder: {
+      color: "#c8a24a",
+      parts: [["path", { d: "M1.5 4.2h4.3l1.4 1.7h7.3v7.4H1.5z" }]],
+    },
+    doc: {
+      color: "#8a8f98",
+      parts: [
+        ["path", { d: "M3.5 1.8h6L13 5.3v8.9H3.5z" }],
+        ["path", { d: "M9.5 1.8v3.5H13" }],
+        ["path", { d: "M5.8 8.6h4.4M5.8 11h3.2" }],
+      ],
+    },
+    image: {
+      color: "#4a9a8a",
+      parts: [
+        ["rect", { x: 1.8, y: 3, width: 12.4, height: 10, rx: 1.4 }],
+        ["circle", { cx: 5.6, cy: 6.4, r: 1.1 }],
+        ["path", { d: "M2.8 12.2l3.4-3.3 2.6 2.5 1.9-1.8 2.5 2.4" }],
+      ],
+    },
+    archive: {
+      color: "#b08a4a",
+      parts: [
+        ["rect", { x: 2.2, y: 2.4, width: 11.6, height: 11.2, rx: 1.4 }],
+        ["path", { d: "M8 2.4v2.6" }],
+        ["path", { d: "M6.9 6.6h2.2v2.2H6.9z" }],
+        ["path", { d: "M8 10.1v2.4" }],
+      ],
+    },
+    config: {
+      color: "#7f8a9a",
+      parts: [
+        ["path", { d: "M2.4 5.4h1.9M7.7 5.4h5.9" }],
+        ["circle", { cx: 6, cy: 5.4, r: 1.7 }],
+        ["path", { d: "M2.4 10.6h5.9M11.7 10.6h1.9" }],
+        ["circle", { cx: 10, cy: 10.6, r: 1.7 }],
+      ],
+    },
+    lock: {
+      color: "#c8a24a",
+      parts: [
+        ["rect", { x: 3.4, y: 7, width: 9.2, height: 7.2, rx: 1.4 }],
+        ["path", { d: "M5.6 7V5.2a2.4 2.4 0 0 1 4.8 0V7" }],
+      ],
+    },
+    font: {
+      color: "#8a7fc4",
+      parts: [
+        ["path", { d: "M3 13.4L8 2.6l5 10.8" }],
+        ["path", { d: "M5 10h6" }],
+      ],
+    },
+    hourglass: {
+      color: "#c8b04a",
+      parts: [
+        ["path", { d: "M4.2 2.2h7.6M4.2 13.8h7.6" }],
+        ["path", { d: "M5.2 2.2v2.2L8 8l2.8-3.6V2.2" }],
+        ["path", { d: "M5.2 13.8v-2.2L8 8l2.8 3.6v2.2" }],
+      ],
+    },
+    terminal: {
+      color: "#7f8a9a",
+      parts: [
+        ["rect", { x: 1.8, y: 2.6, width: 12.4, height: 10.8, rx: 1.6 }],
+        ["path", { d: "M4.4 6.4l2 2-2 2" }],
+        ["path", { d: "M8.4 10.6h3.4" }],
+      ],
+    },
+  };
+
+  /** Extension -> icon spec, resolved once as `{ kind: 'chip' | 'glyph', … }`. */
+  var FILE_ICONS = (function () {
+    var owns = function (bag, key) { return Object.prototype.hasOwnProperty.call(bag, key); };
+    var table = {};
+    for (var chip in FILE_CHIPS) {
+      if (!owns(FILE_CHIPS, chip)) continue;
+      var entry = FILE_CHIPS[chip];
+      table[chip] = { kind: "chip", label: entry[0], bg: entry[1], fg: entry[2] };
+    }
+    for (var alias in FILE_CHIP_ALIASES) {
+      if (!owns(FILE_CHIP_ALIASES, alias)) continue;
+      var target = FILE_CHIP_ALIASES[alias];
+      if (owns(table, target)) table[alias] = table[target];
+    }
+    for (var glyph in FILE_GLYPH_EXTS) {
+      if (!owns(FILE_GLYPH_EXTS, glyph)) continue;
+      var exts = FILE_GLYPH_EXTS[glyph].split(" ");
+      for (var i = 0; i < exts.length; i++) table[exts[i]] = { kind: "glyph", glyph: glyph };
+    }
+    return table;
+  })();
+
+  /**
+   * Icon spec for one row.
+   *
+   * A leading dot names a dotfile, not an extension (`.gitignore` is a plain
+   * file), but a dotted name keeps its real extension (`.eslintrc.json` is
+   * JSON). `hasOwnProperty` rather than a truthiness test, because a plain
+   * object answers `constructor` and friends.
+   *
+   * @param name - the entry's file name (not a full path).
+   * @param isDir - whether the entry is a directory.
+   */
+  function fileIconSpec(name, isDir) {
+    if (isDir) return { kind: "glyph", glyph: "folder" };
+    var lower = String(name === null || name === undefined ? "" : name).toLowerCase();
+    var ext = extOf(lower);
+    if (ext === "" || (lower.charAt(0) === "." && lower.indexOf(".", 1) === -1)) {
+      return { kind: "glyph", glyph: "doc" };
+    }
+    if (Object.prototype.hasOwnProperty.call(FILE_ICONS, ext)) return FILE_ICONS[ext];
+    // Unmapped extension: its own letters on neutral grey. Distinct by
+    // construction, and honest about being unclassified.
+    return { kind: "chip", label: ext.slice(0, 3).toUpperCase(), bg: "#5d6470", fg: "#ffffff" };
+  }
+
+  /**
+   * The icon cell shared by the 文件 rows, the 改动 rows, the preview header and
+   * the 工具 rows: pass `entry`, or `name` (+ optional `isDir`), or an explicit
+   * `glyph` from `FILE_GLYPHS`.
+   */
+  function FileIcon(props) {
+    var spec;
+    if (props.glyph) {
+      spec = { kind: "glyph", glyph: props.glyph };
+    } else {
+      // `entry` is the file-tree shape ({ path, name, isDir, size }); the 改动
+      // rows only carry a path, so they pass `name` and are never directories.
+      var entry = props.entry || null;
+      var name = props.name !== undefined ? props.name : entry ? entry.name : "";
+      var isDir = props.isDir !== undefined ? props.isDir : !!(entry && entry.isDir);
+      spec = fileIconSpec(name, isDir);
+    }
+    if (spec.kind === "chip") {
+      var size = spec.label.length > 3 ? 3 : spec.label.length;
+      return React.createElement(
+        "span",
+        {
+          className: "dsp__fileIcon dsp__fileIcon--chip dsp__fileIcon--chip" + size,
+          style: { backgroundColor: spec.bg, color: spec.fg },
+          "aria-hidden": "true",
+        },
+        spec.label
+      );
+    }
+    var glyph = FILE_GLYPHS[spec.glyph] || FILE_GLYPHS.doc;
+    var parts = glyph.parts.map(function (part, index) {
+      var attrs = {
+        key: index,
+        fill: "none",
+        stroke: glyph.color,
+        strokeWidth: 1.25,
+        strokeLinecap: "round",
+        strokeLinejoin: "round",
+      };
+      var own = part[1];
+      for (var key in own) attrs[key] = own[key];
+      return React.createElement(part[0], attrs);
+    });
+    return React.createElement(
+      "svg",
+      {
+        className: "dsp__fileIcon dsp__fileIcon--glyph",
+        viewBox: "0 0 16 16",
+        width: 16,
+        height: 16,
+        "aria-hidden": "true",
+        focusable: "false",
+      },
+      parts
+    );
+  }
+
+  /**
    * The Chat view slice carrying settled tool calls and in-flight calls.
    *
    * It lives on the CONVERSATION snapshot (`views.get('chat')`, registered by
@@ -650,7 +930,15 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
 .dsp__crumbs { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary, #666); font-size: 12px; }
 .dsp__file { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 6px; cursor: default; }
 .dsp__file:hover { background: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / 5%)); }
-.dsp__fileIcon { flex: none; width: 16px; text-align: center; color: var(--dsw-alias-label-tertiary, #888); }
+.dsp__fileIcon { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; }
+/* Lettered chip: a coloured square carrying up to three characters (JS, PY,
+   C++) — the thing that makes a source file recognisable at a glance. Short
+   labels are allowed to grow, because one glyph in a 16px box is mostly box. */
+.dsp__fileIcon--chip { border-radius: 3px; font-family: ui-monospace, Consolas, monospace; font-weight: 700; line-height: 1; letter-spacing: -0.02em; }
+.dsp__fileIcon--chip1 { font-size: 9px; }
+.dsp__fileIcon--chip2 { font-size: 8px; }
+.dsp__fileIcon--chip3 { font-size: 7px; }
+.dsp__fileIcon--glyph { color: var(--dsw-alias-label-tertiary, #888); }
 .dsp__fileName { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsp__fileMeta { color: var(--dsw-alias-label-tertiary, #888); font-size: 11px; flex: none; }
 .dsp__menu { position: fixed; z-index: 12000; min-width: 200px; padding: 4px; border: 1px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 16%)); border-radius: 10px; background: var(--dsw-alias-bg-layer-2, #fff); box-shadow: 0 10px 34px rgb(0 0 0 / 20%); }
@@ -1306,7 +1594,7 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
                   else openPreview(entry);
                 },
               },
-              React.createElement("span", { className: "dsp__fileIcon" }, entry.isDir ? "📁" : "📄"),
+              React.createElement(FileIcon, { entry: entry }),
               React.createElement("span", { className: "dsp__fileName" }, entry.name),
               React.createElement("span", { className: "dsp__fileMeta" }, entry.isDir ? "" : fmtCompact(entry.size) + "B")
             )
@@ -1320,6 +1608,7 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
             React.createElement(
               "div",
               { className: "dsp__previewHeader" },
+              React.createElement(FileIcon, { entry: preview.entry }),
               React.createElement("span", { className: "dsp__previewTitle" }, preview.entry.name),
               React.createElement("button", {
                 type: "button",
@@ -1409,6 +1698,7 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
           return React.createElement(
             "div",
             { key: c.time + "-" + idx, className: "dsp__change", title: c.path },
+            React.createElement(FileIcon, { name: baseName(c.path) }),
             React.createElement("span", { className: "dsp__changePath" }, c.path),
             React.createElement("span", { className: "dsp__changeMeta" }, c.tool)
           );
@@ -1458,7 +1748,7 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
                     "aria-selected": c.callId === selected ? "true" : "false",
                     onClick: function () { setSelected(c.callId); },
                   },
-                  React.createElement("span", { className: "dsp__fileIcon" }, c.running ? "⏳" : "🔧"),
+                  React.createElement(FileIcon, { glyph: c.running ? "hourglass" : "terminal" }),
                   React.createElement("span", { className: "dsp__fileName" }, c.name),
                   React.createElement("span", { className: "dsp__fileMeta" }, c.callId.slice(0, 8))
                 );
