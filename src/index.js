@@ -13,7 +13,10 @@
  *   GET  /dsh-sidebar-panel/api/usage-today          today's spend from the background scan of the
  *                                                    stored session logs, plus the live peak/valley state
  *
- * The overview cost uses the official DeepSeek price table with the official
+ * The today spend counts DeepSeek-served requests only (`isDeepSeekModel`): the
+ * card reports the DeepSeek account, so a session run on any other provider is
+ * not part of it. The overview cost uses the official DeepSeek price table with
+ * the official
  * peak/valley schedule (weekday 09:00-12:00 / 14:00-18:00 Beijing time is peak;
  * nights, weekends and statutory holidays are valley); request usage and
  * timestamps are folded from each session's durable event log (`session/event`
@@ -378,6 +381,19 @@ const OFFICIAL_PRICES = {
   'deepseek-flash': { inputPerM: 1, cacheHitPerM: 0.02, cacheWritePerM: 1, outputPerM: 4 },
 };
 
+/**
+ * Whether a request was served by DeepSeek itself. The account card reports
+ * DeepSeek's own money — balance, today's spend, the peak/valley schedule — so a
+ * request answered by any other provider is NOT part of `今日已用`: pricing it
+ * would invent a charge the account never received (and the fallback row is
+ * DeepSeek's own rate anyway). Ids drift (`deepseek-v4-flash-vision-exp`, or a
+ * routed `deepseek/deepseek-chat`), so the vendor substring decides rather than
+ * a fixed list.
+ */
+function isDeepSeekModel(model) {
+  return String(model ?? '').toLowerCase().includes('deepseek');
+}
+
 /** Longest-key substring match over a price table; `null` when nothing fits. */
 function matchPrice(table, id) {
   let best = null;
@@ -393,10 +409,14 @@ function matchPrice(table, id) {
 
 /**
  * Price entry for a model id: an exact entry in the user's table wins, then a
- * substring match there, then the built-in official table, then the fallback.
+ * substring match there, then the built-in official table, then the fallback
+ * row (DeepSeek's own rate, for a DeepSeek id the table does not know yet).
  * Substring matching exists because model ids drift between releases
  * (`deepseek-v4-flash-vision-exp` is served by the Flash line), and longest
  * first so `flash` can never swallow a longer, pricier id.
+ *
+ * This function prices whatever id it is given; excluding other vendors is the
+ * caller's job, and only the today scan does it.
  */
 function priceOf(model, config) {
   const id = String(model ?? '').toLowerCase();
@@ -501,7 +521,9 @@ function priceRequest(record, config) {
  * `foldSession` cannot touch (it requires a live Session object).
  *
  * `request/header` events carry the route for the usage events that follow, so
- * the whole stream is walked even when the window starts later.
+ * the whole stream is walked even when the window starts later. Requests whose
+ * route is not DeepSeek are skipped entirely — they are neither priced nor
+ * counted, they merely do not belong to the account this card describes.
  */
 function scanUsage(events, config, fromMs, toMs) {
   let cost = 0;
@@ -517,6 +539,8 @@ function scanUsage(events, config, fromMs, toMs) {
     if (event.type !== 'assistant/message') continue;
     const usage = event.data?.usage;
     if (!usage || typeof usage.inputTokens !== 'number') continue;
+    // Only the account's own vendor is counted; see `isDeepSeekModel`.
+    if (!isDeepSeekModel(model)) continue;
     const time = eventTime(event);
     if (time < fromMs || time >= toMs) continue;
     const value = priceRequest({

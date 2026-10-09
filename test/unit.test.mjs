@@ -776,6 +776,28 @@ async function usageToday(instant) {
   console.log('✓ /usage-today resolves the built-in official table by model id substring');
 }
 
+// 15. The card describes the DeepSeek account, so a session run on any other
+// provider is not part of "used today": those requests are neither priced (the
+// official table knows nothing about them, and the fallback row would invent a
+// charge the account never received) nor counted, and they gain no by-model row.
+{
+  const day = Date.UTC(2026, 9, 11, 12); // 2026-10-11 20:00 +08 (Sunday: valley)
+  const file = await writeSessionLog('--D-DSH-mixed--', 'sess-mixed', 'session.v4.jsonl.zstd', [
+    usageEvents('claude-opus-4-6', Date.UTC(2026, 9, 11, 5), 1000000),
+    usageEvents('deepseek-v4-flash', Date.UTC(2026, 9, 11, 5), 1000000),
+    usageEvents('gpt-5.2', Date.UTC(2026, 9, 11, 6), 1000000),
+  ]);
+  await fs.utimes(file, new Date(day), new Date(day));
+
+  await resetUsage();
+  const today = await __test.warmUsage(config, ctx.logger, day);
+  assert.equal(today.requests, 1, 'foreign-vendor requests are skipped, not counted');
+  assert.equal(today.cost, 1, 'only the DeepSeek request is priced (Sunday valley, Flash = 1 CNY/M)');
+  assert.equal(today.byModel.length, 1, 'a foreign model never earns a by-model row');
+  assert.equal(today.byModel[0].model, 'deepseek-v4-flash');
+  console.log('✓ /usage-today counts DeepSeek-served requests only');
+}
+
 // The plugin registers a real interval for the background scan; dispose it or the
 // test process would never exit.
 for (const cleanup of ctx._cleanups.reverse()) cleanup();
