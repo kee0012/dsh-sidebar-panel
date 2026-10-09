@@ -383,6 +383,24 @@ console.log('✓ module contract + route registration');
   assert.equal(parse(res).error.code, 'OUTSIDE_WORKSPACE');
   console.log('✓ file-raw escape rejected');
 }
+{
+  // svg is an image a user expects to SEE. It is served on the whitelist as
+  // image/svg+xml (a hostile SVG could otherwise only ever arrive as an
+  // untyped download), and the response is sandboxed because that route can
+  // also be opened as a top-level document, where an SVG script WOULD run.
+  const res = makeRes();
+  const done = finished(res);
+  const url = '/dsh-sidebar-panel/api/file-raw?root=' + encodeURIComponent(PROJECT_ROOT)
+    + '&path=' + encodeURIComponent('icon.svg');
+  await handler(makeReq('GET', url, OK_HEADERS), res);
+  await done;
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['content-type'], 'image/svg+xml');
+  assert.equal(res.headers['x-content-type-options'], 'nosniff');
+  assert.ok(String(res.headers['content-security-policy']).includes('sandbox'), 'a direct hit cannot run svg script');
+  assert.ok(res.body.includes('<svg'), 'streamed body is the real svg');
+  console.log('✓ file-raw svg → image/svg+xml (sandboxed)');
+}
 
 // 11. balance route (official DeepSeek user/balance, key from credentials)
 {
@@ -796,6 +814,41 @@ async function usageToday(instant) {
   assert.equal(today.byModel.length, 1, 'a foreign model never earns a by-model row');
   assert.equal(today.byModel[0].model, 'deepseek-v4-flash');
   console.log('✓ /usage-today counts DeepSeek-served requests only');
+}
+
+// 16. The 改动 tab reads the LIVE argument shape. A real session log stores a
+// tool call's arguments as a JSON **string** (`data.arguments`), which the
+// object-shaped fixtures above never exercised — so the tab stayed empty for
+// every real session while these tests passed. Read-only tools carry the very
+// same `path`/`file_path` names, so the write-tool gate has to come first or
+// merely opening a file would be listed as changing it.
+{
+  const sessionId = 's-test-changes-shape';
+  const base = Date.UTC(2026, 9, 12, 2, 0, 0);
+  const events = [
+    { type: 'tool/call', seq: 0, time: base, data: { name: 'write', arguments: JSON.stringify({ file_path: 'D:/x/new.ts', content: 'x' }) } },
+    { type: 'tool/call', seq: 1, time: base + 1, data: { name: 'edit', arguments: JSON.stringify({ file_path: 'D:/x/edited.ts', old_string: 'a', new_string: 'b' }) } },
+    { type: 'tool/call', seq: 2, time: base + 2, data: { name: 'read', arguments: JSON.stringify({ file_path: 'D:/x/read-only.ts' }) } },
+    { type: 'tool/call', seq: 3, time: base + 3, data: { name: 'grep', arguments: JSON.stringify({ pattern: 'x', path: 'D:/x/grepped.ts' }) } },
+    { type: 'tool/call', seq: 4, time: base + 4, data: { name: 'pwsh', arguments: JSON.stringify({ command: 'Remove-Item D:/x/removed.ts' }) } },
+    // A truncated payload must not throw out of the session event stream.
+    { type: 'tool/call', seq: 5, time: base + 5, data: { name: 'write', arguments: '{"file_path": "D:/x/cut' } },
+  ];
+  const session = {
+    id: sessionId,
+    snapshotEvents: (fromSeq = 0) => events.slice(fromSeq),
+  };
+  ctx._sessions.set(sessionId, session);
+  ctx._listeners['session/event'](session);
+
+  const res = makeRes();
+  await handler(makeReq('GET', '/dsh-sidebar-panel/api/changes?sessionId=' + sessionId, OK_HEADERS), res);
+  assert.equal(res.status, 200);
+  const data = parse(res);
+  assert.deepEqual(data.changes.map((c) => c.path), ['D:/x/edited.ts', 'D:/x/new.ts'],
+    'only write-tool calls are listed, newest first');
+  assert.deepEqual(data.changes.map((c) => c.tool), ['edit', 'write']);
+  console.log('✓ changes tracks the live JSON-string arguments (write tools only)');
 }
 
 // The plugin registers a real interval for the background scan; dispose it or the

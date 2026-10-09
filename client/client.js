@@ -194,6 +194,8 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     "files.preview.loading": "加载中…",
     "files.preview.truncated": "内容过长已截断；可右键『添加文件内容』，或直接让模型读取该文件",
     "files.preview.unsupported": "暂不支持预览该类型文件",
+    "files.preview.source": "源码",
+    "files.preview.image": "图像",
     "changes.title": "本次会话的改动",
     "changes.empty": "暂无记录（写文件类工具调用会记录在这里）",
     "changes.note": "bash/pwsh 等命令内部的改动可能未被捕获",
@@ -287,6 +289,8 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     "files.preview.loading": "Loading…",
     "files.preview.truncated": "Content truncated; use 'Add file content' or ask the model to read the file",
     "files.preview.unsupported": "Preview not supported for this file type",
+    "files.preview.source": "Source",
+    "files.preview.image": "Image",
     "changes.title": "Changes in this session",
     "changes.empty": "No records yet (write-tool calls are tracked here)",
     "changes.note": "Changes made inside bash/pwsh commands may not be captured",
@@ -597,9 +601,15 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     html: 1, htm: 1, css: 1, js: 1, mjs: 1, cjs: 1, jsx: 1, ts: 1, tsx: 1,
     py: 1, java: 1, c: 1, h: 1, cpp: 1, hpp: 1, cc: 1, go: 1, rs: 1, rb: 1,
     php: 1, sh: 1, bash: 1, zsh: 1, ps1: 1, bat: 1, cmd: 1, toml: 1, ini: 1,
-    cfg: 1, conf: 1, log: 1, csv: 1, sql: 1, svg: 1, diff: 1, patch: 1,
+    cfg: 1, conf: 1, log: 1, csv: 1, sql: 1, diff: 1, patch: 1,
   };
-  var ASSET_EXTS = { pdf: 1, png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1 };
+  /**
+   * Rendered by the browser instead of shown as code. `svg` belongs HERE even
+   * though it is also text: an icon the user clicks is an image, and dumping
+   * its markup was the whole complaint. It keeps a 源码 toggle in the preview
+   * header, which reads it back through `/file-content`.
+   */
+  var ASSET_EXTS = { pdf: 1, png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1, svg: 1 };
 
   function extOf(name) {
     var i = name.lastIndexOf(".");
@@ -1696,8 +1706,31 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
       }
     }
 
-    /** Clicking a file opens a preview: text files inline, pdf/images via the
-     *  file-raw route (served with a safe content-type). */
+    /** Raw-bytes URL of a previewable asset (served by /file-raw). */
+    function assetUrl(entry) {
+      return API_BASE + "/file-raw?root=" + encodeURIComponent(root) + "&path=" + encodeURIComponent(entry.path);
+    }
+
+    /** The inline text body: the default for source files, svg's 源码 view. */
+    function loadText(entry, seq) {
+      setPreview({ entry: entry, kind: "text", text: null, truncated: false, error: null, loading: true });
+      apiPost("/file-content", { root: root, path: entry.path }).then(function (data) {
+        if (seq !== previewSeq.current) return;
+        if (data && data.ok) {
+          setPreview({ entry: entry, kind: "text", text: data.text, truncated: data.truncated, error: null, loading: false });
+        } else {
+          // Out of range / over the size limit / unreadable: show the failure
+          // (code + message) instead of a blank preview pane.
+          setPreview({ entry: entry, kind: "text", text: null, truncated: false, error: errorText(data && data.error, "read failed"), loading: false });
+        }
+      }).catch(function (err) {
+        if (seq !== previewSeq.current) return;
+        setPreview({ entry: entry, kind: "text", text: null, truncated: false, error: errorText(err, "read failed"), loading: false });
+      });
+    }
+
+    /** Clicking a file opens a preview: text files inline, pdf/images/svg via
+     *  the file-raw route (served with a safe content-type). */
     function openPreview(entry) {
       // Bumped for every preview, including the asset/unsupported kinds whose
       // body renders synchronously: that is what invalidates a text fetch the
@@ -1705,30 +1738,20 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
       var seq = ++previewSeq.current;
       var ext = extOf(entry.name);
       if (TEXT_EXTS[ext]) {
-        setPreview({ entry: entry, kind: "text", text: null, truncated: false, error: null, loading: true });
-        apiPost("/file-content", { root: root, path: entry.path }).then(function (data) {
-          if (seq !== previewSeq.current) return;
-          if (data && data.ok) {
-            setPreview({ entry: entry, kind: "text", text: data.text, truncated: data.truncated, error: null, loading: false });
-          } else {
-            // Out of range / over the size limit / unreadable: show the failure
-            // (code + message) instead of a blank preview pane.
-            setPreview({ entry: entry, kind: "text", text: null, truncated: false, error: errorText(data && data.error, "read failed"), loading: false });
-          }
-        }).catch(function (err) {
-          if (seq !== previewSeq.current) return;
-          setPreview({ entry: entry, kind: "text", text: null, truncated: false, error: errorText(err, "read failed"), loading: false });
-        });
+        loadText(entry, seq);
       } else if (ASSET_EXTS[ext]) {
-        setPreview({
-          entry: entry,
-          kind: "asset",
-          url: API_BASE + "/file-raw?root=" + encodeURIComponent(root) + "&path=" + encodeURIComponent(entry.path),
-          error: null,
-        });
+        setPreview({ entry: entry, kind: "asset", url: assetUrl(entry), error: null });
       } else {
         setPreview({ entry: entry, kind: "unsupported", error: null });
       }
+    }
+
+    /** svg only: the same file, as the rendered image or as its source. */
+    function toggleSvgSource() {
+      if (preview === null) return;
+      var seq = ++previewSeq.current;
+      if (preview.kind === "asset") loadText(preview.entry, seq);
+      else setPreview({ entry: preview.entry, kind: "asset", url: assetUrl(preview.entry), error: null });
     }
 
     if (root === null) {
@@ -1792,6 +1815,13 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
               { className: "dsp__previewHeader" },
               React.createElement(FileIcon, { entry: preview.entry }),
               React.createElement("span", { className: "dsp__previewTitle" }, preview.entry.name),
+              extOf(preview.entry.name) === "svg"
+                ? React.createElement("button", {
+                    type: "button",
+                    className: "dsp__btn",
+                    onClick: toggleSvgSource,
+                  }, preview.kind === "asset" ? t("files.preview.source") : t("files.preview.image"))
+                : null,
               React.createElement("button", {
                 type: "button",
                 className: "dsp__close",
@@ -1836,6 +1866,28 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
   /* Changes tab                                                         */
   /* ------------------------------------------------------------------ */
 
+  /**
+   * One row per FILE, not per call. A session that edits the same file twenty
+   * times should read as one line with a ×20 rather than twenty identical
+   * lines; the newest touch supplies the row's tool and its position. The host
+   * already returns the list newest-first, so the first hit for a path wins.
+   */
+  function mergeChanges(changes) {
+    var byPath = new Map();
+    var order = [];
+    for (var i = 0; i < changes.length; i += 1) {
+      var c = changes[i];
+      var prev = byPath.get(c.path);
+      if (prev === undefined) {
+        byPath.set(c.path, { path: c.path, tool: c.tool, time: c.time, count: 1 });
+        order.push(c.path);
+      } else {
+        prev.count += 1;
+      }
+    }
+    return order.map(function (p) { return byPath.get(p); });
+  }
+
   function ChangesTab(props) {
     var t = props.t;
     var [changes, setChanges] = React.useState([]);
@@ -1876,13 +1928,13 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
       React.createElement(
         "div",
         { className: "dsp__card" },
-        changes.map(function (c, idx) {
+        mergeChanges(changes).map(function (c, idx) {
           return React.createElement(
             "div",
-            { key: c.time + "-" + idx, className: "dsp__change", title: c.path },
+            { key: c.path + "-" + idx, className: "dsp__change", title: c.path },
             React.createElement(FileIcon, { name: baseName(c.path) }),
             React.createElement("span", { className: "dsp__changePath" }, c.path),
-            React.createElement("span", { className: "dsp__changeMeta" }, c.tool)
+            React.createElement("span", { className: "dsp__changeMeta" }, c.count > 1 ? c.tool + " ×" + c.count : c.tool)
           );
         })
       ),

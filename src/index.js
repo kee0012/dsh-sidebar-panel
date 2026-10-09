@@ -245,11 +245,30 @@ function eventTime(event) {
   return event.time ?? event.data?.time ?? Date.now();
 }
 
-/** Best-effort extraction of the file a write-like tool call touched. */
+/**
+ * Best-effort extraction of the file a write-like tool call touched.
+ *
+ * Two shapes have to be honoured. A LIVE session stores a tool call's
+ * arguments as a JSON **string** (`data.arguments: "{\"file_path\":…}"`) —
+ * reading only the already-parsed object shape is what left the 改动 tab
+ * empty for every real session while the object-shaped unit tests stayed
+ * green. The `writeTools` gate also comes FIRST now: `read`, `grep` and
+ * `glob` all carry a `path`/`file_path` argument, and a name-blind scan
+ * listed every file the model had merely looked at as if it had written it.
+ */
 function extractWritePath(toolName, args, writeTools) {
-  if (typeof args !== 'object' || args === null) return null;
+  if (!writeTools.includes(toolName)) return null;
+  let params = args;
+  if (typeof params === 'string') {
+    try {
+      params = JSON.parse(params);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof params !== 'object' || params === null) return null;
   const candidates = [];
-  for (const [key, value] of Object.entries(args)) {
+  for (const [key, value] of Object.entries(params)) {
     if (typeof value !== 'string' || value === '') continue;
     const lower = key.toLowerCase();
     if (/(^|[_.-])(path|file|target|dir|dest|name)$/.test(lower) && !/query|pattern|search/.test(lower)) {
@@ -259,11 +278,8 @@ function extractWritePath(toolName, args, writeTools) {
   const heuristic = candidates.find((v) => /[\\/]/.test(v) || /\.\w{1,10}$/.test(v)) ?? candidates[0];
   if (heuristic !== undefined && heuristic !== null) return heuristic;
   // Fallback: a known write tool with any string arg that looks like a path.
-  if (writeTools.includes(toolName)) {
-    const found = Object.values(args).find((v) => typeof v === 'string' && /[\\/]/.test(v));
-    return found ?? null;
-  }
-  return null;
+  const found = Object.values(params).find((v) => typeof v === 'string' && /[\\/]/.test(v));
+  return found ?? null;
 }
 
 /** Incremental fold of one session's durable events (token-meter style). */
@@ -1187,12 +1203,24 @@ function applyPlugin(ctx, config) {
             : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
             : ext === '.gif' ? 'image/gif'
             : ext === '.webp' ? 'image/webp'
+            : ext === '.svg' ? 'image/svg+xml'
             : 'application/octet-stream';
-          response.writeHead(200, {
+          const headers = {
             'content-type': contentType,
             'cache-control': 'no-store',
             'content-length': info.size,
-          });
+            // Keeps a mislabelled file from being sniffed back into HTML.
+            'x-content-type-options': 'nosniff',
+          };
+          if (ext === '.svg') {
+            // SVG is the one preview type that is both an image and a
+            // document: inside `<img>` its scripts never run, but opening the
+            // route directly renders it as a same-origin document. The
+            // sandbox directive removes scripts from that top-level case.
+            headers['content-security-policy'] =
+              "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+          }
+          response.writeHead(200, headers);
           const stream = createReadStream(target);
           stream.on('error', () => {
             // Headers are already on the wire, so a JSON error payload is no
@@ -1310,4 +1338,8 @@ export const __test = {
   findTodaysSessionLogs,
   decodeSessionLog,
   usageSnapshot,
+  // The 改动 path extractor is the half of the fold that a real session log
+  // exercises differently from the fixtures (arguments arrive as a JSON
+  // string), so it is exported to be replayed against real logs.
+  extractWritePath,
 };
