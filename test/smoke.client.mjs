@@ -176,7 +176,13 @@ function withHooks(fn, props, passes = 4) {
       useState(init) {
         const i = cursor++;
         if (!(i in state)) state[i] = typeof init === 'function' ? init() : init;
-        return [state[i], next => { if (state[i] !== next) { state[i] = next; dirty = true; } }];
+        return [state[i], next => {
+          // React's functional updater: the file list merges a directory into
+          // the cache this way, and a stub that stored the function itself would
+          // leave the tab with no entries at all.
+          const value = typeof next === 'function' ? next(state[i]) : next;
+          if (state[i] !== value) { state[i] = value; dirty = true; }
+        }];
       },
       useEffect(effect) {
         const i = effectIndex++;
@@ -559,6 +565,104 @@ let closeCallsRef = [];
     'and replaced by exactly one tagged sheet');
 
   console.log('✓ stylesheet ownership: tagged, idempotent, untagged leftovers evicted');
+}
+
+/* ---------------- E. Office documents hand off to the shipped preview ---------------- */
+
+{
+  // This panel cannot decode .docx/.xlsx/.pptx — the shipped document preview
+  // can (LibreOffice → PDF; spreadsheets in the browser). Clicking such a row
+  // must navigate the column there with a session-scoped file address, exactly
+  // as the shipped file tree does, instead of opening an "unsupported" pane.
+  const exports = load();
+  const { ctx, registrations } = makeCtx();
+  exports.apply(ctx);
+
+  const realFetch = globalThis.fetch;
+  const openResourceCalls = [];
+
+  /* A SYNCHRONOUS stand-in for a fetch chain. The harness' own fetch never
+   * settles (effects stay inert), so the file list would never render and there
+   * would be nothing to click; here every `.then` resolves on the spot, which
+   * leaves the first render pass already holding the entries. */
+  function syncChain(value) {
+    const chain = { __sync: true };
+    const resolved = () => (value && value.__sync === true ? value.value : value);
+    Object.defineProperty(chain, 'value', { get: resolved });
+    chain.then = fn => syncChain(fn(resolved()));
+    chain.catch = () => syncChain(value);
+    chain.finally = fn => { fn(); return syncChain(value); };
+    return chain;
+  }
+
+  globalThis.fetch = url => {
+    const target = String(url);
+    const body = target.includes('/api/files')
+      ? { ok: true, path: '/workspace', entries: [
+          { name: 'report.docx', path: '/workspace/report.docx', isDir: false, size: 2048 },
+          { name: 'notes.md', path: '/workspace/notes.md', isDir: false, size: 12 },
+        ] }
+      : target.includes('/api/file-content')
+        ? { ok: true, text: '# notes', truncated: false, chars: 7 }
+        : { ok: true, config: { reference: { file: '@<path>', folder: '@<path>/', contentHeader: '<!-- <path> <chars> -->' } } };
+    return syncChain({ ok: true, status: 200, text: () => syncChain(JSON.stringify(body)) });
+  };
+
+  function vnodes(node, out = []) {
+    if (node === null || node === undefined || typeof node !== 'object') return out;
+    if (Array.isArray(node)) { for (const child of node) vnodes(child, out); return out; }
+    out.push(node);
+    vnodes(node.children, out);
+    return out;
+  }
+
+  // The navigation face this tab's pane hands the body: the same shape the slot
+  // framework synthesizes, with the resource call recorded instead of ignored.
+  const navProps = panelProps({
+    useTabInfo: () => ({
+      sidebar: { expanded: true, fullscreen: false },
+      panel: { id: 'p1' },
+      tab: {
+        id: 'tab-ours', kind: PACKAGE_ID, contentId: 'dsh-sidebar-panel', title: 'panel',
+        visible: true, navigation: { address: 'dsh-tab://dsh-sidebar-panel', params: undefined, revision: 0 },
+        signal: new AbortController().signal,
+        actions: {
+          close: noop,
+          openResource: address => openResourceCalls.push(address),
+          openTab: noop,
+        },
+      },
+    }),
+  });
+
+  localStorage.setItem('dshSidebarPanel:tab:s1', 'files');
+  const body = registrations.find(r => r.options.name === 'sidebar.right.pane.tab');
+  const filesEl = vnodes(withHooks(body.component, navProps))
+    .find(el => typeof el.type === 'function' && el.type.name === 'FilesTab');
+  assert.ok(filesEl, 'the 文件 tab element must be created once the tab preference is files');
+  assert.equal(typeof filesEl.props.tabActions.openResource, 'function',
+    'the pane navigation face must reach the 文件 tab');
+
+  const filesTree = withHooks(filesEl.type, filesEl.props);
+  const rows = vnodes(filesTree).filter(el => el.props && el.props.className === 'dsp__file');
+  assert.equal(rows.length, 2, 'both entries of the stubbed directory must render');
+
+  const docx = rows.find(row => textOf(row).join(' ').includes('report.docx'));
+  const markdown = rows.find(row => textOf(row).join(' ').includes('notes.md'));
+  assert.ok(docx && markdown, 'both stub rows must be found');
+
+  docx.props.onClick();
+  assert.deepEqual(openResourceCalls, ['dsh-resource://file/session/s1/report.docx'],
+    'an Office click must navigate the column to the shipped document preview');
+
+  // A file this panel CAN preview keeps its own pane: the hand-off is a decision
+  // about one file, not a blanket "open everything in the other tab".
+  markdown.props.onClick();
+  assert.equal(openResourceCalls.length, 1, 'a markdown file must stay in the panel preview');
+
+  globalThis.fetch = realFetch;
+  localStorage.store = {};
+  console.log('✓ office rows hand off to dsh-resource://file/session/… (other files stay local)');
 }
 
 for (const cleanup of cleanups) cleanup();

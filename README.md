@@ -12,8 +12,8 @@ DSH（DeepSeek Harness）**右侧栏的一个页签插件**：通过官方右栏
 - **概览**
   - **DeepSeek 账户**卡片——官方余额（经 `GET https://api.deepseek.com/user/balance` 实时查询，15 秒刷新）、**今日已用**（当日北京时间 00:00 起，由后台扫描本机会话日志做 token 计价估算，**只统计 DeepSeek 系列模型**）与**峰/谷时段指示**（按 DeepSeek 官方时段：工作日 09:00–12:00、14:00–18:00 为**峰**，夜间、周末与法定节假日为**谷**；峰红谷绿，并显示到下一次切换的倒计时），右上角为**充值按钮**（跳转 https://platform.deepseek.com/usage）。切换到概览页即刻显示（上次结果会立刻回填，后台再刷新）；服务端首次扫描尚未完成时金额处显示"统计中…"，随后自动补齐。
   - 上下文窗口（已用/总量/百分比/距压缩）、本轮上下文预算（提示词/输出预算/物理剩余空间/上限来源）、会话指标（命中率/**本次会话费用**/运行时间/请求数/累计 tokens）、用量分析（按来源/按类型，含输入输出、命中未命中明细）。服务端数据每 5 秒自动刷新（右上角显示"更新于 HH:MM:SS"），投影数据（token/上下文）实时响应。
-- **文件**：当前会话工作区的文件树。文件与文件夹按类型显示各自的图标（彩色字母章 + 内联 SVG 轮廓：图片 / 压缩包 / 字体 / 锁文件 / 配置 / 脚本等各有其形，未收录的扩展名回退为中性字母章），图形全部由 CSS 与内联 SVG 绘制，不依赖图标字体或图片资源。**单击文件预览**（md/txt/代码等文本内联显示，PDF、图片与 SVG 内嵌预览，SVG 顶部可在「图像 / 源码」之间切换，大文件截断提示）；**右键菜单**：在文件管理器中显示、添加文件引用 / 添加文件内容（文件）、添加文件夹引用（文件夹）、复制绝对路径 / 复制相对路径。插入内容会写入对话输入框。
-- **改动**：本次会话中写文件类工具（write/edit/str-replace-editor 等）触碰过的文件列表；**同一文件只占一行**，多次改动显示 `×N`，最新一次在最前。
+- **文件**：当前会话工作区的文件树。文件与文件夹按类型显示各自的图标（彩色字母章 + 内联 SVG 轮廓：图片 / 压缩包 / 字体 / 锁文件 / 配置 / 脚本等各有其形，未收录的扩展名回退为中性字母章），图形全部由 CSS 与内联 SVG 绘制，不依赖图标字体或图片资源。**单击文件预览**（md/txt/代码等文本内联显示；PDF 与常见图片 `png/jpg/jpe/gif/webp/bmp/ico/avif/svg` 内嵌预览，SVG 顶部可在「图像 / 源码」之间切换；大文件截断提示）。**Word / Excel / PowerPoint（doc/docx/xls/xlsx/ppt/pptx）不在本插件内解码**——单击即把该文件交给 **DSH 内置的「文档预览」页签**（同栏新开页签并聚焦，内置预览用 LibreOffice 转 PDF、表格在浏览器内渲染），交接不可用时才提示不支持；TIFF / HEIC / ICNS 任何浏览器都解不开，改为提示用系统看图工具打开。**右键菜单**：在文件管理器中显示、添加文件引用 / 添加文件内容（文件）、添加文件夹引用（文件夹）、复制绝对路径 / 复制相对路径。插入内容会写入对话输入框。
+- **改动**：本次会话中写文件类工具（write/edit/str-replace-editor 等）触碰过的文件列表；**同一文件只占一行**，多次改动显示 `×N`，最新一次在最前。列表里若是 **Word / Excel / PowerPoint** 文档，**单击该行**即用与「文件」页签相同的交接方式打开 DSH 内置文档预览（交接不可用时在该页签显示提示，不静默失败）。
 - **工具**：本窗口内的工具调用列表与参数/结果详情（自建渲染）。
 
 ## 安装
@@ -71,7 +71,7 @@ dsh plugin --profile desktop add github:kee0012/dsh-sidebar-panel
 | `GET /dsh-sidebar-panel/api/overview?sessionId=` | 请求数、费用、运行时间、按模型用量 |
 | `GET /dsh-sidebar-panel/api/files?root=&path=` | 列目录（文件+文件夹），锁定在工作区内 |
 | `POST /dsh-sidebar-panel/api/file-content` | 读取文件内容（截断上限可配置） |
-| `GET /dsh-sidebar-panel/api/file-raw?root=&path=` | 原始字节预览（PDF/图片/SVG，content-type 白名单；SVG 另带 `nosniff` + 沙箱 CSP） |
+| `GET /dsh-sidebar-panel/api/file-raw?root=&path=` | 原始字节预览（PDF 与图片/SVG，content-type 白名单：`pdf png jpg jpe jpeg gif webp bmp ico avif svg` 各有真实 mime；SVG 另带 `nosniff` + 沙箱 CSP；TIFF/HEIC/ICNS 故意只给 `octet-stream`） |
 | `GET /dsh-sidebar-panel/api/balance` | DeepSeek 官方余额（`user/balance`，key 来自 DSH 凭据，永不下发浏览器） |
 | `GET /dsh-sidebar-panel/api/usage-today` | 今日已用（读内存快照，不阻塞）+ 官方峰/谷状态与下次切换时刻 |
 | `POST /dsh-sidebar-panel/api/reveal` | 在文件管理器中显示（win32/darwin/linux 分发） |

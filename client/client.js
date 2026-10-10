@@ -194,6 +194,9 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     "files.preview.loading": "加载中…",
     "files.preview.truncated": "内容过长已截断；可右键『添加文件内容』，或直接让模型读取该文件",
     "files.preview.unsupported": "暂不支持预览该类型文件",
+    "files.preview.unsupportedImage": "浏览器无法显示这种图片（TIFF / HEIC / ICNS），请用系统看图工具打开",
+    "files.preview.dshHint": "用 DSH 文档预览打开",
+    "files.preview.dshFailed": "DSH 文档预览无法打开该文件",
     "files.preview.source": "源码",
     "files.preview.image": "图像",
     "changes.title": "本次会话的改动",
@@ -289,6 +292,9 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     "files.preview.loading": "Loading…",
     "files.preview.truncated": "Content truncated; use 'Add file content' or ask the model to read the file",
     "files.preview.unsupported": "Preview not supported for this file type",
+    "files.preview.unsupportedImage": "No browser displays this image format (TIFF / HEIC / ICNS); open it with a system viewer",
+    "files.preview.dshHint": "Open in DSH document preview",
+    "files.preview.dshFailed": "DSH document preview could not open this file",
     "files.preview.source": "Source",
     "files.preview.image": "Image",
     "changes.title": "Changes in this session",
@@ -608,12 +614,92 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
    * though it is also text: an icon the user clicks is an image, and dumping
    * its markup was the whole complaint. It keeps a 源码 toggle in the preview
    * header, which reads it back through `/file-content`.
+   *
+   * `jpe`, `bmp`, `ico` and `avif` joined later: the file tree always drew an
+   * image glyph for them and then opened a "no preview" pane, because only the
+   * glyph table knew them. The host route serves each of the four a real
+   * content-type now. TIFF / HEIC / ICNS stay OUT on purpose — see
+   * `UNDECODABLE_IMAGE_EXTS`.
    */
-  var ASSET_EXTS = { pdf: 1, png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1, svg: 1 };
+  var ASSET_EXTS = {
+    pdf: 1, png: 1, jpg: 1, jpeg: 1, jpe: 1, gif: 1, webp: 1, bmp: 1, ico: 1,
+    avif: 1, svg: 1,
+  };
+
+  /**
+   * Image formats the file tree recognizes but no browser engine decodes.
+   * Handing these to an `<img>` shows a broken glyph, so the preview says what
+   * is actually wrong (and what to open instead) rather than "unsupported".
+   */
+  var UNDECODABLE_IMAGE_EXTS = { tif: 1, tiff: 1, heic: 1, heif: 1, icns: 1 };
+
+  /**
+   * Office documents this panel does NOT decode. Clicking one navigates to the
+   * shipped right Sidebar's document preview, which converts Word and
+   * PowerPoint to PDF through the bundled LibreOffice and renders spreadsheets
+   * in the browser. Keeping the list here — instead of trying to sniff the
+   * format — is what makes the hand-off a one-line decision at click time.
+   */
+  var OFFICE_EXTS = { doc: 1, docx: 1, xls: 1, xlsx: 1, ppt: 1, pptx: 1 };
 
   function extOf(name) {
     var i = name.lastIndexOf(".");
     return i < 0 ? "" : name.slice(i + 1).toLowerCase();
+  }
+
+  /* Resource addresses ---------------------------------------------------
+   * The shipped navigator hands its file rows to the document preview as
+   * `dsh-resource://file/session/<sessionId>/<path>`; the encoding below is the
+   * same one it uses — component-encode each segment but keep `:` literal, so a
+   * Windows drive letter survives. `cwd` only decides whether an absolute path
+   * can be shortened into the session's own workspace; a path outside it stays
+   * absolute inside the same address, which the preview also accepts.
+   */
+
+  var FILE_ADDRESS_PREFIX = "dsh-resource://file/";
+
+  function encodeAddressSegment(segment) {
+    return encodeURIComponent(segment).replace(/%3A/gi, ":");
+  }
+
+  function sessionFileAddress(sessionId, path) {
+    var normalized = String(path).replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+    return FILE_ADDRESS_PREFIX + "session/" + encodeAddressSegment(String(sessionId)) + "/" +
+      normalized.split("/").map(encodeAddressSegment).join("/");
+  }
+
+  function isAbsolutePath(path) {
+    return path.charAt(0) === "/" || /^[A-Za-z]:[/\\]/.test(path) || path.slice(0, 2) === "\\\\";
+  }
+
+  /** The address of `path` as this tab's session reads it (see the note above). */
+  function fileAddressFor(sessionId, cwd, path) {
+    var normalized = String(path).replace(/\\/g, "/");
+    if (!isAbsolutePath(normalized)) return sessionFileAddress(sessionId, normalized);
+    var root = typeof cwd === "string" ? cwd.replace(/\\/g, "/").replace(/\/+$/, "") : "";
+    if (root !== "" && normalized === root) return sessionFileAddress(sessionId, "");
+    if (root !== "" && normalized.indexOf(root + "/") === 0) {
+      return sessionFileAddress(sessionId, normalized.slice(root.length + 1));
+    }
+    return sessionFileAddress(sessionId, normalized);
+  }
+
+  /**
+   * Hand one file to the shipped document preview through the same navigation
+   * the shipped file tree uses (`tab.actions.openResource`). Returns false when
+   * the column's navigation face or the session id is missing, so the caller
+   * falls back to its own pane instead of swallowing the click.
+   */
+  function openInDshPreview(tabActions, sessionId, cwd, path) {
+    if (tabActions === null || tabActions === undefined) return false;
+    if (typeof tabActions.openResource !== "function") return false;
+    if (typeof sessionId !== "string" || sessionId === "") return false;
+    try {
+      tabActions.openResource(fileAddressFor(sessionId, cwd, path));
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /**
@@ -1031,6 +1117,7 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
 .dsp__menuSep { height: 1px; margin: 4px 6px; background: var(--dsw-alias-border-l2, rgb(0 0 0 / 10%)); }
 .dsp__change { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; }
 .dsp__change:hover { background: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / 5%)); }
+.dsp__change--open { cursor: pointer; }
 .dsp__changePath { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 .dsp__changeMeta { color: var(--dsw-alias-label-tertiary, #888); font-size: 11px; flex: none; }
 .dsp__toolRow { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
@@ -1587,6 +1674,12 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     );
   }
 
+  /**
+   * The 文件 tab. `props.tabActions` is the shipped column's navigation face for
+   * the pane this body lives in: clicking an Office document hands the file to
+   * the shipped document preview through it (see `openInDshPreview`) instead of
+   * opening a pane this plugin cannot fill.
+   */
   function FilesTab(props) {
     var t = props.t;
     var root = props.cwd || null;
@@ -1737,6 +1830,16 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
       // user has already clicked past.
       var seq = ++previewSeq.current;
       var ext = extOf(entry.name);
+      // Office documents are not decoded here at all: the shipped document
+      // preview does it properly (LibreOffice → PDF, spreadsheets in the
+      // browser), so the click navigates there and this pane closes. When that
+      // hand-off is unavailable — no navigation face, no session id — the pane
+      // below still explains itself instead of swallowing the click.
+      if (OFFICE_EXTS[ext] &&
+          openInDshPreview(props.tabActions, props.sessionId, root, entry.path)) {
+        setPreview(null);
+        return;
+      }
       if (TEXT_EXTS[ext]) {
         loadText(entry, seq);
       } else if (ASSET_EXTS[ext]) {
@@ -1847,7 +1950,10 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
                 ? extOf(preview.entry.name) === "pdf"
                   ? React.createElement("iframe", { className: "dsp__previewFrame", src: preview.url, title: preview.entry.name })
                   : React.createElement("img", { className: "dsp__previewImg", src: preview.url, alt: preview.entry.name })
-                : React.createElement("div", { className: "dsp__empty" }, t("files.preview.unsupported"))
+                : React.createElement("div", { className: "dsp__empty" },
+                    UNDECODABLE_IMAGE_EXTS[extOf(preview.entry.name)]
+                      ? t("files.preview.unsupportedImage")
+                      : t("files.preview.unsupported"))
           )
         : null,
       notice
@@ -1929,9 +2035,24 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
         "div",
         { className: "dsp__card" },
         mergeChanges(changes).map(function (c, idx) {
+          // A row for an Office document is a way IN, not just a path: the same
+          // hand-off the 文件 tab performs, so a spreadsheet this session wrote
+          // is one click from the preview that can actually render it.
+          var office = c.path !== "" && OFFICE_EXTS[extOf(baseName(c.path))] === 1;
           return React.createElement(
             "div",
-            { key: c.path + "-" + idx, className: "dsp__change", title: c.path },
+            {
+              key: c.path + "-" + idx,
+              className: "dsp__change" + (office ? " dsp__change--open" : ""),
+              title: office ? c.path + " — " + t("files.preview.dshHint") : c.path,
+              onClick: office
+                ? function () {
+                    if (!openInDshPreview(props.tabActions, props.sessionId, props.cwd, c.path)) {
+                      setError(t("files.preview.dshFailed"));
+                    }
+                  }
+                : undefined,
+            },
             React.createElement(FileIcon, { name: baseName(c.path) }),
             React.createElement("span", { className: "dsp__changePath" }, c.path),
             React.createElement("span", { className: "dsp__changeMeta" }, c.count > 1 ? c.tool + " ×" + c.count : c.tool)
@@ -2064,12 +2185,21 @@ window.__ModuleLoader__.load({ id: "dsh-sidebar-panel", factory: (require) => {
     } else if (tab === "files") {
       body = React.createElement(FilesTab, {
         cwd: cwd,
+        // The pane's own navigation face: Office documents are handed to the
+        // shipped document preview through it, with this session as the scope.
+        sessionId: props.sessionId,
+        tabActions: tabActions,
         useInput: props.useInput,
         inputActions: props.inputActions,
         t: t,
       });
     } else if (tab === "changes") {
-      body = React.createElement(ChangesTab, { sessionId: props.sessionId, t: t });
+      body = React.createElement(ChangesTab, {
+        sessionId: props.sessionId,
+        cwd: cwd,
+        tabActions: tabActions,
+        t: t,
+      });
     } else {
       body = React.createElement(ToolsTab, {
         useSession: props.useSession,

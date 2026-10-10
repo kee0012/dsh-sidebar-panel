@@ -401,6 +401,41 @@ console.log('✓ module contract + route registration');
   assert.ok(res.body.includes('<svg'), 'streamed body is the real svg');
   console.log('✓ file-raw svg → image/svg+xml (sandboxed)');
 }
+{
+  // Formats the file tree always drew an image glyph for, but the whitelist did
+  // not know: clicking one opened "no preview" while the icon promised a
+  // picture. Each now gets the mime a browser decodes. TIFF/HEIC/ICNS are
+  // deliberately NOT here — no engine decodes them, so they must stay
+  // octet-stream and be reported as an unsupported image by the client.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsp-img-'));
+  try {
+    const cases = [['a.bmp', 'image/bmp'], ['a.ico', 'image/x-icon'],
+      ['a.avif', 'image/avif'], ['a.jpe', 'image/jpeg']];
+    for (const [name, mime] of cases) {
+      await fs.writeFile(path.join(dir, name), 'x');
+      const res = makeRes();
+      const done = finished(res);
+      const url = '/dsh-sidebar-panel/api/file-raw?root=' + encodeURIComponent(dir)
+        + '&path=' + encodeURIComponent(name);
+      await handler(makeReq('GET', url, OK_HEADERS), res);
+      await done;
+      assert.equal(res.status, 200);
+      assert.equal(res.headers['content-type'], mime, name + ' should be served as ' + mime);
+      assert.equal(res.headers['x-content-type-options'], 'nosniff');
+    }
+    await fs.writeFile(path.join(dir, 'a.tiff'), 'x');
+    const res = makeRes();
+    const done = finished(res);
+    const url = '/dsh-sidebar-panel/api/file-raw?root=' + encodeURIComponent(dir)
+      + '&path=' + encodeURIComponent('a.tiff');
+    await handler(makeReq('GET', url, OK_HEADERS), res);
+    await done;
+    assert.equal(res.headers['content-type'], 'application/octet-stream');
+    console.log('✓ file-raw bmp/ico/avif/jpe are images; tiff is not');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
 
 // 11. balance route (official DeepSeek user/balance, key from credentials)
 {

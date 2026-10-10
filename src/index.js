@@ -1198,11 +1198,18 @@ function applyPlugin(ctx, config) {
             return;
           }
           const ext = path.extname(target).toLowerCase();
+          // Only formats a browser actually decodes get a real mime. TIFF, HEIC
+          // and ICNS are deliberately absent: they would render as a broken
+          // image, so the client asks for them as an unsupported preview
+          // instead of an <img>. Everything unmatched stays octet-stream.
           const contentType = ext === '.pdf' ? 'application/pdf'
             : ext === '.png' ? 'image/png'
-            : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
+            : ext === '.jpg' || ext === '.jpeg' || ext === '.jpe' ? 'image/jpeg'
             : ext === '.gif' ? 'image/gif'
             : ext === '.webp' ? 'image/webp'
+            : ext === '.bmp' ? 'image/bmp'
+            : ext === '.ico' ? 'image/x-icon'
+            : ext === '.avif' ? 'image/avif'
             : ext === '.svg' ? 'image/svg+xml'
             : 'application/octet-stream';
           const headers = {
